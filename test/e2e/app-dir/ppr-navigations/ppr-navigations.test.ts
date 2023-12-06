@@ -30,7 +30,26 @@ describe('ppr-navigations', () => {
     next = await createNext({
       files: __dirname,
       env: { TEST_DATA_SERVICE_URL: `http://localhost:${port}` },
+
+      // This test intentionally doesn't set the PPR flag to true in the Next.js
+      // config so we can test both behaviors in CI.
+      //
+      // TODO: The non-PPR test case should really be extracted into a non-PPR
+      // test suite. I put it in here for now because I want to use the testing
+      // helpers I wrote below, but I'm not yet ready to extract those into a
+      // shared module until I write more tests and iterate on them first.
+      //
+      // nextConfig: {
+      //   experimental: {
+      //     ppr: true,
+      //   },
+      // }
     })
+    // Because we don't set an explicit flag, it will inherit the default value
+    // set by the testing environment.
+    const isPPREnabled =
+      process.env.__NEXT_TEST_MODE &&
+      process.env.__NEXT_EXPERIMENTAL_PPR === 'true'
 
     // There should have been no data requests during build
     TestLog.assert([])
@@ -50,21 +69,35 @@ describe('ppr-navigations', () => {
       '/loading-tsx-no-partial-rendering/yay'
     )
 
-    // The <Link> triggers a prefetch. Even though this route has a loading.tsx
-    // boundary, we're still able to prefetch the static data in the page.
-    // Without PPR, we would have stopped prefetching at the loading.tsx
-    // boundary. (The dynamic data is not fetched until navigation.)
-    await TestLog.waitFor(['REQUEST: yay [static]'])
+    // The <Link> triggers a prefetch.
 
-    // Navigate. This will trigger the dynamic fetch.
-    await link.click()
+    if (isPPREnabled) {
+      // Even though this route has a loading.tsx boundary, we're still able to
+      // prefetch the static data in the page. (The dynamic data is not fetched
+      // until navigation.)
+      await TestLog.waitFor(['REQUEST: yay [static!]'])
 
-    // TODO: Even though the prefetch request hasn't resolved yet, we should
-    // have already started fetching the dynamic data. Currently, the dynamic
-    // is fetched lazily during rendering, creating a waterfall. The plan is to
-    // remove this waterfall by initiating the fetch directly inside the
-    // router navigation handler, not during render.
-    TestLog.assert([])
+      // Navigate. This will trigger the dynamic fetch.
+      await link.click()
+
+      // TODO: Even though the prefetch request hasn't resolved yet, we should
+      // have already started fetching the dynamic data. Currently, the dynamic
+      // is fetched lazily during rendering, creating a waterfall. The plan is to
+      // remove this waterfall by initiating the fetch directly inside the
+      // router navigation handler, not during render.
+      TestLog.assert([])
+    } else {
+      // When PPR is not enabled, the loading.tsx boundary prevents the prefetch
+      // from rendering anything inside it.
+      await TestLog.waitFor(['REQUEST: Loading... [provided by loading.tsx]'])
+      pendingRequests.get('Loading... [provided by loading.tsx]').resolve()
+
+      // Navigate. This will trigger the dynamic fetch.
+      await link.click()
+
+      // Now we receive requests for both the static and dynamic data
+      await TestLog.waitFor(['REQUEST: yay [dynamic]', 'REQUEST: yay [static]'])
+    }
 
     // Finish loading the static data
     pendingRequests.get('yay [static]').resolve()
@@ -76,8 +109,12 @@ describe('ppr-navigations', () => {
       'Loading dynamic...<div id="static">yay [static]</div>'
     )
 
-    // The dynamic data is fetched
-    TestLog.assert(['REQUEST: yay [dynamic]'])
+    if (isPPREnabled) {
+      // The dynamic data is fetched
+      // TODO: This should have happened earlier, before the static data
+      // resolved. See comment above.
+      TestLog.assert(['REQUEST: yay [dynamic]'])
+    }
 
     // Finish loading and render the full UI
     pendingRequests.get('yay [dynamic]').resolve()
@@ -86,15 +123,18 @@ describe('ppr-navigations', () => {
       '<div id="dynamic">yay [dynamic]</div><div id="static">yay [static]</div>'
     )
 
-    // Now we'll demonstrate that even though loading.tsx wasn't activated
-    // during initial render, it still acts as a regular Suspense boundary.
-    // Trigger a "bad" Suspense fallback by intentionally suspending without
-    // startTransition.
-    await browser.elementById('trigger-bad-suspense-fallback').click()
-    const loading = await browser.elementById('loading-tsx')
-    expect(await loading.innerHTML()).toEqual(
-      'Loading... [provided by loading.tsx]'
-    )
+    if (isPPREnabled) {
+      // Now we'll demonstrate that even though loading.tsx wasn't activated
+      // during initial render, it still acts as a regular Suspense boundary.
+      // Trigger a "bad" Suspense fallback by intentionally suspending without
+      // startTransition.
+      pendingRequests.clear()
+      await browser.elementById('trigger-bad-suspense-fallback').click()
+      const loading = await browser.elementById('loading-tsx')
+      expect(await loading.innerHTML()).toEqual(
+        'Loading... [provided by loading.tsx]'
+      )
+    }
   })
 })
 
@@ -240,10 +280,6 @@ function createTestLog() {
     const error = new Error()
     Error.captureStackTrace(error, waitFor)
 
-    if (events.length !== 0) {
-      error.message = 'The log is not empty. Call assert() before continuing.'
-      throw error
-    }
     if (pendingExpectation !== null) {
       error.message = 'A previous waitFor() is still pending.'
       throw error

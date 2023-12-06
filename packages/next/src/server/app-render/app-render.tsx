@@ -250,6 +250,9 @@ async function generateFlight(
   // Currently a single item array but in the future multiple patches might be combined in a single request.
   let flightData: FlightData | null = null
 
+  // ctx.isPrefetch = true
+  console.log('ctx.isPrefetch', ctx.isPrefetch)
+
   const {
     componentMod: { tree: loaderTree, renderToReadableStream },
     getDynamicParamFromSegment,
