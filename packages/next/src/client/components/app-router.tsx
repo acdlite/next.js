@@ -57,7 +57,6 @@ import { isBot } from '../../shared/lib/router/utils/is-bot'
 import { addBasePath } from '../add-base-path'
 import { AppRouterAnnouncer } from './app-router-announcer'
 import { RedirectBoundary } from './redirect-boundary'
-import { findHeadInCache } from './router-reducer/reducers/find-head-in-cache'
 import { createInfinitePromise } from './infinite-promise'
 import { NEXT_RSC_UNION_QUERY } from './app-router-headers'
 import { removeBasePath } from '../remove-base-path'
@@ -542,13 +541,9 @@ function Router({
   const { cache, tree, nextUrl, focusAndScrollRef } =
     useUnwrapState(reducerState)
 
-  const head = useMemo(() => {
-    return findHeadInCache(cache, tree[1])
-  }, [cache, tree])
-
   let content = (
     <RedirectBoundary>
-      {head}
+      {cache.head}
       {cache.rsc}
       <AppRouterAnnouncer tree={tree} />
     </RedirectBoundary>

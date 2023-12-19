@@ -13,9 +13,35 @@ export function fillLazyItemsTillLeafWithHead(
   head: React.ReactNode,
   wasPrefetched?: boolean
 ): void {
+  // The head conceptually belongs to a single segment — the currently active
+  // page — but there's only one per router state, and it's rendered by the
+  // root component (AppRouter). So we can store it on the root cache node.
+  //
+  // TODO: Really it should go on the reducer state object instead, so that we
+  // don't have to add an extra field to the Cache Nodes. We can do in a follow
+  // up where we also rename this function, since it's more about filling the
+  // cache with data as opposed to setting the `head` property. OTOH, this will
+  // likely be replaced in the PPR implementation anyway, which is why I'm
+  // leaving it as-is for now.
+  newCache.head = head
+  fillCacheNodesWithSeedData(
+    newCache,
+    existingCache,
+    routerState,
+    cacheNodeSeedData,
+    wasPrefetched
+  )
+}
+
+function fillCacheNodesWithSeedData(
+  newCache: CacheNode,
+  existingCache: CacheNode | undefined,
+  routerState: FlightRouterState,
+  cacheNodeSeedData: CacheNodeSeedData | null,
+  wasPrefetched?: boolean
+): void {
   const isLastSegment = Object.keys(routerState[1]).length === 0
   if (isLastSegment) {
-    newCache.head = head
     return
   }
   // Remove segment that we got data for so that it is filled in during rendering of rsc.
@@ -85,12 +111,11 @@ export function fillLazyItemsTillLeafWithHead(
         // Overrides the cache key with the new cache node.
         parallelRouteCacheNode.set(cacheKey, newCacheNode)
         // Traverse deeper to apply the head / fill lazy items till the head.
-        fillLazyItemsTillLeafWithHead(
+        fillCacheNodesWithSeedData(
           newCacheNode,
           existingCacheNode,
           parallelRouteState,
           parallelSeedData ? parallelSeedData : null,
-          head,
           wasPrefetched
         )
 
@@ -132,7 +157,6 @@ export function fillLazyItemsTillLeafWithHead(
       undefined,
       parallelRouteState,
       parallelSeedData,
-      head,
       wasPrefetched
     )
   }
