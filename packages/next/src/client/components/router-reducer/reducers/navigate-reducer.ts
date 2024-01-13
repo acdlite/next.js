@@ -439,9 +439,10 @@ function navigateReducer_PPR(
               currentCache,
               currentTree,
               prefetchedTree,
-              seedData,
-              head,
-              isPrefetchStale
+              // If the prefetched cache entry is stale, we don't show it. We
+              // wait for the dynamic data to stream in.
+              isPrefetchStale ? null : seedData,
+              isPrefetchStale ? null : head
             )
             if (task !== null && task.node !== null) {
               // We've created a new Cache Node tree that contains a prefetched
