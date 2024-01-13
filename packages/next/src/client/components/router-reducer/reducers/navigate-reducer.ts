@@ -361,7 +361,7 @@ function navigateReducer_PPR(
   prefetchQueue.bump(data!)
 
   return data!.then(
-    ([flightData, canonicalUrlOverride, _postponed]) => {
+    ([flightData, canonicalUrlOverride, postponed]) => {
       // we only want to mark this once
       if (prefetchValues && !prefetchValues.lastUsedTime) {
         // important: we should only mark the cache node as dirty after we unsuspend from the call above
@@ -432,8 +432,24 @@ function navigateReducer_PPR(
             // Check whether the prefetched data is stale. If so, we'll
             // ignore it and wait for the dynamic data to stream in before
             // showing new segments.
+            //
+            // We also do this in development since currently PPR is never
+            // enabled in dev.
             const isPrefetchStale =
-              prefetchEntryCacheStatus === PrefetchCacheEntryStatus.stale
+              prefetchEntryCacheStatus === PrefetchCacheEntryStatus.stale ||
+              process.env.NODE_ENV === 'development'
+
+            const isFullyStatic =
+              // In production, the absence of a postponed header in the
+              // response means that the response is fully static.
+              //
+              // Currently, the header is never set in development, so in dev we
+              // can't treat its absence as a signal that it's static.
+              process.env.NODE_ENV === 'production' &&
+              !postponed &&
+              // If the prefetch entry is stale, then we should do another
+              // request regardless.
+              !isPrefetchStale
 
             const task = updateCacheNodeOnNavigation(
               currentCache,
@@ -442,7 +458,8 @@ function navigateReducer_PPR(
               // If the prefetched cache entry is stale, we don't show it. We
               // wait for the dynamic data to stream in.
               isPrefetchStale ? null : seedData,
-              isPrefetchStale ? null : head
+              isPrefetchStale ? null : head,
+              isFullyStatic
             )
             if (task !== null && task.node !== null) {
               // We've created a new Cache Node tree that contains a prefetched
@@ -457,28 +474,33 @@ function navigateReducer_PPR(
 
               const newCache = task.node
 
-              // The prefetched tree has dynamic holes in it. We initiate a
-              // dynamic request to fill them in.
-              //
-              // Do not block on the result. We'll immediately render the Cache
-              // Node tree and suspend on the dynamic parts. When the request
-              // comes in, we'll fill in missing data and ping React to
-              // re-render. Unlike the lazy fetching model in the non-PPR
-              // implementation, this is modeled as a single React update +
-              // streaming, rather than multiple top-level updates. (However,
-              // even in the new model, we'll still need to sometimes update the
-              // root multiple times per navigation, like if the server sends us
-              // a different response than we expected. For now, we revert back
-              // to the lazy fetching mechanism in that case.)
-              listenForDynamicRequest(
-                task,
-                fetchServerResponse(
-                  url,
-                  currentTree,
-                  state.nextUrl,
-                  state.buildId
+              if (task.needsDynamicRequest) {
+                // The prefetched tree has dynamic holes in it. We initiate a
+                // dynamic request to fill them in.
+                //
+                // Do not block on the result. We'll immediately render the
+                // Cache Node tree and suspend on the dynamic parts. When the
+                // request comes in, we'll fill in missing data and ping React
+                // to re-render. Unlike the lazy fetching model in the non-PPR
+                // implementation, this is modeled as a single React update +
+                // streaming, rather than multiple top-level updates. (However,
+                // even in the new model, we'll still need to sometimes update
+                // the root multiple times per navigation, like if the server
+                // sends us a different response than we expected. For now, we
+                // revert back to the lazy fetching mechanism in that case.)
+                listenForDynamicRequest(
+                  task,
+                  fetchServerResponse(
+                    url,
+                    currentTree,
+                    state.nextUrl,
+                    state.buildId
+                  )
                 )
-              )
+              } else {
+                // The target page is fully static, so we don't need to request
+                // additional data.
+              }
 
               mutable.cache = newCache
             } else {
