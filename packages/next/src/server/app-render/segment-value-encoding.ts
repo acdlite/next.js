@@ -55,11 +55,12 @@ export function encodeChildSegmentKey(
 }
 
 // Define a regex pattern to match the most common characters found in a route
-// param. It excludes anything that might not be cross-platform filesystem
-// compatible, like |. It does not need to be precise because the fallback is to
-// just base64url-encode the whole parameter, which is fine; we just don't do it
-// by default for compactness, and for easier debugging.
-const simpleParamValueRegex = /^[a-zA-Z0-9\-_@]+$/
+// param. It excludes anything that might not be URL-safe, like #, or
+// cross-platform filesystem compatible, like |. It does not need to be precise
+// because the fallback is to just base64url-encode the whole parameter, which
+// is fine; we just don't do it by default for compactness, and for easier
+// debugging.
+const simpleParamValueRegex = /^[a-zA-Z0-9\-_@()~.]+$/
 
 function encodeToFilesystemAndURLSafeString(value: string) {
   if (simpleParamValueRegex.test(value)) {
