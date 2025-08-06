@@ -452,6 +452,7 @@ export async function handler(
       const context: AppPageRouteHandlerContext = {
         query,
         params,
+        parsedUrl,
         page: normalizedSrcPage,
         sharedContext: {
           buildId,

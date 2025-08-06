@@ -2,6 +2,7 @@ import type { AppPageRouteDefinition } from '../../route-definitions/app-page-ro
 import type RenderResult from '../../render-result'
 import type { RenderOpts } from '../../app-render/types'
 import type { NextParsedUrlQuery } from '../../request-meta'
+import type { UrlWithParsedQuery } from 'url'
 import type { LoaderTree } from '../../lib/app-dir-module'
 import type { PrerenderManifest } from '../../../build'
 
@@ -56,6 +57,7 @@ type AppPageUserlandModule = {
 export interface AppPageRouteHandlerContext extends RouteModuleHandleContext {
   page: string
   query: NextParsedUrlQuery
+  parsedUrl: UrlWithParsedQuery
   fallbackRouteParams: FallbackRouteParams | null
   renderOpts: RenderOpts
   serverComponentsHmrCache?: ServerComponentsHmrCache
@@ -110,6 +112,7 @@ export class AppPageRouteModule extends RouteModule<
       res,
       context.page,
       context.query,
+      context.parsedUrl,
       context.fallbackRouteParams,
       context.renderOpts,
       context.serverComponentsHmrCache,
@@ -128,6 +131,7 @@ export class AppPageRouteModule extends RouteModule<
       res,
       context.page,
       context.query,
+      context.parsedUrl,
       context.fallbackRouteParams,
       context.renderOpts,
       context.serverComponentsHmrCache,

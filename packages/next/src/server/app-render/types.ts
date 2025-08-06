@@ -324,6 +324,14 @@ export type RenderOpts = LoadComponentsReturnType<AppPageModule> &
 
 export type PreloadCallbacks = (() => void)[]
 
+export type RenderedUrlParts = {
+  // Corresponds to x-nextjs-rewritten-path. Sent as an array of pathname
+  // segments to prevent crawlers from following the URL.
+  p: Array<string>
+  // Corresponds to x-nextjs-rewritten-query
+  q: ParsedUrlQuery
+}
+
 export type InitialRSCPayload = {
   /** buildId */
   b: string
@@ -334,6 +342,8 @@ export type InitialRSCPayload = {
   // which may have been rewritten on the server.
   /** initialCanonicalUrlParts */
   c: string[]
+  /** renderedUrl */
+  r: RenderedUrlParts | null
   /** couldBeIntercepted */
   i: boolean
   /** initialFlightData */
@@ -352,11 +362,6 @@ export type InitialRSCPayload = {
 export type NavigationFlightResponse = {
   /** buildId */
   b: string
-  // TODO: This isn't really the "canonical" URL (which we usually use to refer
-  // to the URL shown in the browser), it's the URL used to render the page,
-  // which may have been rewritten on the server.
-  /** canonicalUrlParts */
-  c: string[]
   /** flightData */
   f: FlightData
   /** prerendered */
@@ -369,11 +374,6 @@ export type ActionFlightResponse = {
   a: ActionResult
   /** buildId */
   b: string
-  // TODO: This isn't really the "canonical" URL (which we usually use to refer
-  // to the URL shown in the browser), it's the URL used to render the page,
-  // which may have been rewritten on the server.
-  /** canonicalUrlParts */
-  c: string[]
   /** flightData */
   f: FlightData
 }

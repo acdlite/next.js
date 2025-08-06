@@ -10,6 +10,7 @@ import type {
   FlightData,
   InitialRSCPayload,
   FlightDataPath,
+  RenderedUrlParts,
 } from './types'
 import {
   workAsyncStorage,
@@ -29,6 +30,7 @@ import type {
 import type { DeepReadonly } from '../../shared/lib/deep-readonly'
 import type { BaseNextRequest, BaseNextResponse } from '../base-http'
 import type { IncomingHttpHeaders } from 'http'
+import type { UrlWithParsedQuery } from 'url'
 
 import React, { type ErrorInfo, type JSX } from 'react'
 
@@ -223,6 +225,7 @@ export type AppRenderContext = {
   sharedContext: AppSharedContext
   workStore: WorkStore
   url: ReturnType<typeof parseRelativeUrl>
+  parsedUrl: UrlWithParsedQuery
   componentMod: AppPageModule
   renderOpts: RenderOpts
   parsedRequestHeaders: ParsedRequestHeaders
@@ -1060,6 +1063,36 @@ function prepareInitialCanonicalUrl(url: RequestStore['url']) {
   return (url.pathname + url.search).split('/')
 }
 
+function prepareRenderedUrlParts(
+  parsedUrl: UrlWithParsedQuery
+): RenderedUrlParts {
+  // This represents the URL that is observed by components. The params should
+  // match the ones that are passed as props layouts and pages. For client
+  // components, this is actually the source of truth for params. The param
+  // values are extracted from this string. If there was a rewrite, it may be
+  // different from the URL that is showed by the browser. In that case, it
+  // should be the same as the x-nextjs-rewritten-path and
+  // x-nextjs-rewritten-query headers.
+  //
+  // TODO: In the future, we should consider also using this URL as the source
+  // of truth for params in *Server* Components, not just client ones. Currently
+  // params are passed in from the base router separately from this URL. The net
+  // result is the same, but structuring the implementation that way could make
+  // it less prone to inconsistencies and mistakes.
+  //
+  // This is only used during the initial render, both during SSR and during
+  // hydration. During client navigations or revalidations, the client gets this
+  // information from the response object.
+  const pathname = parsedUrl.pathname
+  if (pathname === null) {
+    throw new InvariantError('Could not parse target URL.')
+  }
+  return {
+    p: pathname.split('/'),
+    q: parsedUrl.query,
+  }
+}
+
 // This is the data necessary to render <AppRouter /> when no SSR errors are encountered
 async function getRSCPayload(
   tree: LoaderTree,
@@ -1180,6 +1213,7 @@ async function getRSCPayload(
     b: ctx.sharedContext.buildId,
     p: ctx.assetPrefix,
     c: prepareInitialCanonicalUrl(url),
+    r: prepareRenderedUrlParts(ctx.parsedUrl),
     i: !!couldBeIntercepted,
     f: [
       [
@@ -1302,6 +1336,7 @@ async function getErrorRSCPayload(
     b: ctx.sharedContext.buildId,
     p: ctx.assetPrefix,
     c: prepareInitialCanonicalUrl(url),
+    r: prepareRenderedUrlParts(ctx.parsedUrl),
     m: undefined,
     i: false,
     f: [
@@ -1459,6 +1494,7 @@ async function renderToHTMLOrFlightImpl(
   req: BaseNextRequest,
   res: BaseNextResponse,
   url: ReturnType<typeof parseRelativeUrl>,
+  parsedUrl: UrlWithParsedQuery,
   pagePath: string,
   query: NextParsedUrlQuery,
   renderOpts: RenderOpts,
@@ -1676,6 +1712,7 @@ async function renderToHTMLOrFlightImpl(
   const ctx: AppRenderContext = {
     componentMod: ComponentMod,
     url,
+    parsedUrl,
     renderOpts,
     workStore,
     parsedRequestHeaders,
@@ -1942,6 +1979,7 @@ export type AppPageRender = (
   res: BaseNextResponse,
   pagePath: string,
   query: NextParsedUrlQuery,
+  parsedUrl: UrlWithParsedQuery,
   fallbackRouteParams: FallbackRouteParams | null,
   renderOpts: RenderOpts,
   serverComponentsHmrCache: ServerComponentsHmrCache | undefined,
@@ -1954,6 +1992,7 @@ export const renderToHTMLOrFlight: AppPageRender = (
   res,
   pagePath,
   query,
+  parsedUrl,
   fallbackRouteParams,
   renderOpts,
   serverComponentsHmrCache,
@@ -2021,6 +2060,7 @@ export const renderToHTMLOrFlight: AppPageRender = (
     req,
     res,
     url,
+    parsedUrl,
     pagePath,
     query,
     renderOpts,
