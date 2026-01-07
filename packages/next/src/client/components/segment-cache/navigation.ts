@@ -133,7 +133,7 @@ export function navigateToKnownRoute(
   freshnessPolicy: FreshnessPolicy,
   nextUrl: string | null,
   shouldScroll: boolean,
-  navigateType: 'push' | 'replace',
+  navigateType: NavigationType,
   debugInfo: Array<unknown> | null
 ): AppRouterState {
   // A version of navigate() that accepts the target route tree as an argument
@@ -260,7 +260,7 @@ async function navigateToUnknownRoute(
   currentFlightRouterState: FlightRouterState,
   freshnessPolicy: FreshnessPolicy,
   shouldScroll: boolean,
-  navigateType: 'push' | 'replace'
+  navigateType: 'push' | 'replace' | 'reload'
 ): Promise<AppRouterState> {
   // Runs when a navigation happens but there's no cached prefetch we can use.
   // Don't bother to wait for a prefetch response; go straight to a full
@@ -277,12 +277,13 @@ async function navigateToUnknownRoute(
   let dynamicRequestTree: FlightRouterState
   switch (freshnessPolicy) {
     case FreshnessPolicy.Default:
-    case FreshnessPolicy.HistoryTraversal:
+    case FreshnessPolicy.Restore:
       dynamicRequestTree = currentFlightRouterState
       break
     case FreshnessPolicy.Hydration: // <- shouldn't happen during client nav
     case FreshnessPolicy.RefreshAll:
     case FreshnessPolicy.HMRRefresh:
+    case FreshnessPolicy.Unknown:
       dynamicRequestTree = DynamicRequestTreeForEntireRoute
       break
     default:
@@ -334,7 +335,7 @@ async function navigateToUnknownRoute(
 export function completeHardNavigation(
   state: AppRouterState,
   url: URL,
-  navigateType: 'push' | 'replace'
+  navigateType: NavigationType
 ): AppRouterState {
   const newState: AppRouterState = {
     canonicalUrl: createHrefFromUrl(url),
@@ -367,11 +368,35 @@ export function completeSoftNavigation(
   cache: CacheNode,
   renderedSearch: string,
   canonicalUrl: string,
-  navigateType: 'push' | 'replace',
+  navigateType: NavigationType,
   shouldScroll: boolean,
   scrollableSegments: Array<FlightSegmentPath> | null,
   collectedDebugInfo: Array<unknown> | null
 ) {
+  if (navigateType === 'traverse') {
+    return {
+      // Set canonical url
+      canonicalUrl: createHrefFromUrl(url),
+      renderedSearch,
+      pushRef: {
+        pendingPush: false,
+        mpaNavigation: false,
+        // Ensures that the custom history state that was set is preserved when applying this update.
+        preserveCustomHistoryState: true,
+      },
+      focusAndScrollRef: oldState.focusAndScrollRef,
+      cache,
+      // Restore provided tree
+      tree,
+      nextUrl: referringNextUrl,
+      // TODO: We need to restore previousNextUrl, too, which represents the
+      // Next-Url that was used to fetch the data. Anywhere we fetch using the
+      // canonical URL, there should be a corresponding Next-Url.
+      previousNextUrl: null,
+      debugInfo: null,
+    }
+  }
+
   // The "Next-Url" is a special representation of the URL that Next.js
   // uses to implement interception routes.
   // TODO: The logic here is ripe for simplification. Figure out what is the
@@ -448,37 +473,6 @@ export function completeSoftNavigation(
     debugInfo: collectedDebugInfo,
   }
   return newState
-}
-
-export function completeTraverseNavigation(
-  state: AppRouterState,
-  url: URL,
-  renderedSearch: string,
-  cache: CacheNode,
-  tree: FlightRouterState,
-  nextUrl: string | null
-) {
-  return {
-    // Set canonical url
-    canonicalUrl: createHrefFromUrl(url),
-    renderedSearch,
-    pushRef: {
-      pendingPush: false,
-      mpaNavigation: false,
-      // Ensures that the custom history state that was set is preserved when applying this update.
-      preserveCustomHistoryState: true,
-    },
-    focusAndScrollRef: state.focusAndScrollRef,
-    cache,
-    // Restore provided tree
-    tree,
-    nextUrl,
-    // TODO: We need to restore previousNextUrl, too, which represents the
-    // Next-Url that was used to fetch the data. Anywhere we fetch using the
-    // canonical URL, there should be a corresponding Next-Url.
-    previousNextUrl: null,
-    debugInfo: null,
-  }
 }
 
 // TODO: The rest of this file is related to converting the server response into

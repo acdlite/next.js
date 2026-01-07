@@ -14,7 +14,7 @@ import {
 import { matchSegment } from '../match-segments'
 import { createHrefFromUrl } from './create-href-from-url'
 import { fetchServerResponse } from './fetch-server-response'
-import { dispatchAppRouterAction } from '../use-action-queue'
+import { dispatchAppRouterAction } from './reducers/router-task'
 import {
   ACTION_SERVER_PATCH,
   type ServerPatchAction,
@@ -68,11 +68,12 @@ export type NavigationTask = {
 }
 
 export const enum FreshnessPolicy {
-  Default,
-  Hydration,
-  HistoryTraversal,
-  RefreshAll,
-  HMRRefresh,
+  Hydration = 0,
+  Restore = 1,
+  Default = 2,
+  RefreshAll = 3,
+  HMRRefresh = 4,
+  Unknown = 5,
 }
 
 const enum NavigationTaskStatus {
@@ -312,15 +313,16 @@ function updateCacheNodeOnNavigation(
 
   let shouldRefreshDynamicData: boolean = false
   switch (freshness) {
-    case FreshnessPolicy.Default:
-    case FreshnessPolicy.HistoryTraversal:
     case FreshnessPolicy.Hydration: // <- shouldn't happen during client nav
+    case FreshnessPolicy.Restore:
+    case FreshnessPolicy.Default:
       // We should never drop dynamic data in shared layouts, except during
       // a refresh.
       shouldRefreshDynamicData = false
       break
     case FreshnessPolicy.RefreshAll:
     case FreshnessPolicy.HMRRefresh:
+    case FreshnessPolicy.Unknown:
       shouldRefreshDynamicData = true
       break
     default:
@@ -445,7 +447,7 @@ function updateCacheNodeOnNavigation(
       if (
         // Skip this branch during a history traversal. We restore the tree that
         // was stashed in the history entry as-is.
-        freshness !== FreshnessPolicy.HistoryTraversal &&
+        freshness !== FreshnessPolicy.Restore &&
         newSegmentChild === DEFAULT_SEGMENT_KEY &&
         oldSegmentChild !== DEFAULT_SEGMENT_KEY
       ) {
@@ -924,7 +926,7 @@ function createCacheNodeForSegment(
         needsDynamicRequest: false,
       }
     }
-    case FreshnessPolicy.HistoryTraversal:
+    case FreshnessPolicy.Restore:
       const bfcacheEntry = readFromBFCache(tree.varyPath)
       if (bfcacheEntry !== null) {
         // Only show prefetched data if the dynamic data is still pending. This
@@ -954,6 +956,7 @@ function createCacheNodeForSegment(
       break
     case FreshnessPolicy.RefreshAll:
     case FreshnessPolicy.HMRRefresh:
+    case FreshnessPolicy.Unknown:
       // Don't consult the BFCache.
       break
     default:

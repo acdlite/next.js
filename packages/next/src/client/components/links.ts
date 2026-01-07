@@ -296,10 +296,10 @@ function rescheduleLinkPrefetch(
       return
     }
 
-    const { getCurrentAppRouterState } =
-      require('./app-router-instance') as typeof import('./app-router-instance')
+    const { getLastFinishedState } =
+      require('./router-reducer/reducers/router-task') as typeof import('./router-reducer/reducers/router-task')
 
-    const appRouterState = getCurrentAppRouterState()
+    const appRouterState = getLastFinishedState()
     if (appRouterState !== null) {
       const treeAtTimeOfPrefetch = appRouterState.tree
       if (existingPrefetchTask === null) {
