@@ -201,6 +201,48 @@ struct PlainDirectoryTree {
     /// key is e.g. "dashboard", "(dashboard)", "@slot"
     pub subdirectories: BTreeMap<RcStr, PlainDirectoryTree>,
     pub modules: AppDirModules,
+    /// Static segment names that are one URL level below this node.
+    /// Accounts for route group flattening - static segments inside route groups
+    /// are collected as if they were direct children.
+    ///
+    /// `None` indicates this is a URL-transparent segment (route group or parallel
+    /// route) that should inherit the parent's value during loader tree traversal.
+    pub url_level_static_children: Option<Vec<RcStr>>,
+}
+
+/// Collects all static segment names that are one URL level below a directory.
+/// Route groups and parallel routes are "transparent" - their children are
+/// collected at the same URL level.
+///
+/// Example:
+///
+///     products/
+///     ├── (group1)/
+///     │   └── sale/
+///     └── (group2)/
+///         └── [id]/
+///
+/// For `products`, this returns `["sale"]` - the route groups are flattened,
+/// and only static segments (not `[id]`) are included.
+fn collect_url_level_static_children(subdirs: &BTreeMap<RcStr, PlainDirectoryTree>) -> Vec<RcStr> {
+    let mut result = Vec::new();
+    collect_url_level_static_children_recursive(subdirs, &mut result);
+    result
+}
+
+fn collect_url_level_static_children_recursive(
+    subdirs: &BTreeMap<RcStr, PlainDirectoryTree>,
+    result: &mut Vec<RcStr>,
+) {
+    for (name, subtree) in subdirs {
+        if is_url_transparent_segment(name) {
+            // Transparent segments don't contribute to URL - recurse to find children
+            collect_url_level_static_children_recursive(&subtree.subdirectories, result);
+        } else if !is_dynamic_segment(name) {
+            // Static segment visible at this URL level
+            result.push(name.clone());
+        }
+    }
 }
 
 #[turbo_tasks::value_impl]
@@ -210,12 +252,21 @@ impl DirectoryTree {
         let mut subdirectories = BTreeMap::new();
 
         for (name, subdirectory) in &self.subdirectories {
-            subdirectories.insert(name.clone(), subdirectory.into_plain().owned().await?);
+            let mut child = subdirectory.into_plain().owned().await?;
+            // Each child checks if it's transparent based on its name
+            if is_url_transparent_segment(name) {
+                child.url_level_static_children = None;
+            }
+            subdirectories.insert(name.clone(), child);
         }
+
+        // Compute static children at the next URL level (accounting for route groups)
+        let url_level_static_children = Some(collect_url_level_static_children(&subdirectories));
 
         Ok(PlainDirectoryTree {
             subdirectories,
             modules: self.modules.clone(),
+            url_level_static_children,
         }
         .cell())
     }
@@ -392,6 +443,10 @@ pub struct AppPageLoaderTree {
     pub parallel_routes: FxIndexMap<RcStr, AppPageLoaderTree>,
     pub modules: AppDirModules,
     pub global_metadata: ResolvedVc<GlobalMetadata>,
+    /// For dynamic segments, contains the list of static sibling segments that
+    /// exist at the same URL path level. Used by the client router to determine
+    /// if a prefetch can be reused.
+    pub static_siblings: Vec<RcStr>,
 }
 
 impl AppPageLoaderTree {
@@ -541,6 +596,24 @@ fn is_parallel_route(name: &str) -> bool {
 
 fn is_group_route(name: &str) -> bool {
     name.starts_with('(') && name.ends_with(')')
+}
+
+/// Returns true if this segment is "transparent" from a URL perspective.
+///
+/// Transparent segments exist in the file system tree but don't contribute to
+/// the URL path. When traversing the tree to compute URL-related information
+/// (like static siblings), transparent segments should be recursed into without
+/// consuming a URL path level.
+///
+/// Currently this includes:
+/// - Route groups: `(marketing)`, `(shop)` - organizational grouping only
+/// - Parallel routes: `@modal`, `@sidebar` - render in slots, not URL segments
+fn is_url_transparent_segment(name: &str) -> bool {
+    is_group_route(name) || is_parallel_route(name)
+}
+
+fn is_dynamic_segment(name: &str) -> bool {
+    name.starts_with('[') && name.ends_with(']')
 }
 
 fn match_parallel_route(name: &str) -> Option<&str> {
@@ -991,7 +1064,8 @@ async fn directory_tree_to_loader_tree(
     // the page this loader tree is constructed for
     for_app_path: AppPath,
 ) -> Result<Vc<AppPageLoaderTreeOption>> {
-    let plain_tree = &*directory_tree.into_plain().await?;
+    let plain_tree_vc = directory_tree.into_plain();
+    let plain_tree = &*plain_tree_vc.await?;
 
     let tree = directory_tree_to_loader_tree_internal(
         app_dir,
@@ -1001,6 +1075,8 @@ async fn directory_tree_to_loader_tree(
         app_page,
         for_app_path,
         AppDirModules::default(),
+        // Root has no siblings (it's the only segment at URL level 0)
+        &[],
     )
     .await?;
 
@@ -1080,6 +1156,8 @@ async fn directory_tree_to_loader_tree_internal(
     // the page this loader tree is constructed for
     for_app_path: AppPath,
     mut parent_modules: AppDirModules,
+    // Static siblings at this segment's URL level (from parent's url_level_static_children)
+    parent_static_children: &[RcStr],
 ) -> Result<Option<AppPageLoaderTree>> {
     let app_path = AppPath::from(app_page.clone());
 
@@ -1139,12 +1217,25 @@ async fn directory_tree_to_loader_tree_internal(
         .await?;
     }
 
+    // Compute static siblings from parent's url_level_static_children.
+    // Only include siblings for dynamic segments; static segments don't need this info.
+    let static_siblings = if is_dynamic_segment(&directory_name) {
+        parent_static_children
+            .iter()
+            .filter(|s| *s != &directory_name)
+            .cloned()
+            .collect()
+    } else {
+        Vec::new()
+    };
+
     let mut tree = AppPageLoaderTree {
         page: app_page.clone(),
         segment: directory_name.clone(),
         parallel_routes: FxIndexMap::default(),
         modules: modules.without_leaves(),
         global_metadata: global_metadata.to_resolved().await?,
+        static_siblings,
     };
 
     let current_level_is_parallel_route = is_parallel_route(&directory_name);
@@ -1169,6 +1260,7 @@ async fn directory_tree_to_loader_tree_internal(
                     ..Default::default()
                 },
                 global_metadata: global_metadata.to_resolved().await?,
+                static_siblings: Vec::new(),
             },
         );
     }
@@ -1188,6 +1280,19 @@ async fn directory_tree_to_loader_tree_internal(
             illegal_path_error = Some(e);
         }
 
+        // Determine the static siblings to pass to this child segment.
+        // "Static siblings" are non-dynamic route segments at the same URL level,
+        // used by the client to determine if a prefetch can be reused.
+        //
+        // Transparent segments (route groups like `(marketing)`, parallel routes
+        // like `@modal`) don't consume a URL level, so they have `None` here and
+        // inherit the parent's static children. Regular segments have `Some` with
+        // their own computed static children.
+        let child_static_siblings: &[RcStr] = subdirectory
+            .url_level_static_children
+            .as_deref()
+            .unwrap_or(parent_static_children);
+
         let subtree = Box::pin(directory_tree_to_loader_tree_internal(
             app_dir.clone(),
             global_metadata,
@@ -1196,6 +1301,7 @@ async fn directory_tree_to_loader_tree_internal(
             child_app_page.clone(),
             for_app_path.clone(),
             parent_modules.clone(),
+            child_static_siblings,
         ))
         .await?;
 
@@ -1420,6 +1526,7 @@ async fn default_route_tree(
             }
         },
         global_metadata: global_metadata.to_resolved().await?,
+        static_siblings: Vec::new(),
     })
 }
 
@@ -1662,12 +1769,14 @@ async fn directory_tree_to_entrypoints_internal_untraced(
                                 }
                             },
                             global_metadata,
+                            static_siblings: Vec::new(),
                         }
                     },
                     modules: AppDirModules {
                         ..Default::default()
                     },
                     global_metadata,
+                    static_siblings: Vec::new(),
                 },
             },
             modules: AppDirModules {
@@ -1690,6 +1799,7 @@ async fn directory_tree_to_entrypoints_internal_untraced(
                 ..not_found_root_modules
             },
             global_metadata,
+            static_siblings: Vec::new(),
         }
         .resolved_cell();
 
@@ -1728,10 +1838,12 @@ async fn directory_tree_to_entrypoints_internal_untraced(
                             ..Default::default()
                         },
                         global_metadata,
+                        static_siblings: Vec::new(),
                     }
                 },
                 modules: AppDirModules::default(),
                 global_metadata,
+                static_siblings: Vec::new(),
             }
             .resolved_cell();
 
