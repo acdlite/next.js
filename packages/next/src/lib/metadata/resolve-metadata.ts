@@ -734,7 +734,7 @@ async function resolveMetadataItemsImpl(
   const isPage = typeof page !== 'undefined'
 
   // Handle dynamic segment params.
-  const segmentParam = getDynamicParamFromSegment(segment)
+  const segmentParam = getDynamicParamFromSegment(tree)
   /**
    * Create object holding the parent params and current params
    */
@@ -830,7 +830,7 @@ async function resolveViewportItemsImpl(
   const isPage = typeof page !== 'undefined'
 
   // Handle dynamic segment params.
-  const segmentParam = getDynamicParamFromSegment(segment)
+  const segmentParam = getDynamicParamFromSegment(tree)
   /**
    * Create object holding the parent params and current params
    */
