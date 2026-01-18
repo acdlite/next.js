@@ -404,10 +404,14 @@ impl AppPageLoaderTreeBuilder {
         // to have no siblings" which is distinct from not outputting the field
         // (unknown). Turbopack always knows all siblings since it builds the full
         // directory tree.
+        //
+        // DEBUG: Hardcoding test value to verify CI is using fresh binary
+        let _actual_siblings = static_siblings;
+        let test_siblings: Vec<String> = vec!["TURBOPACK_CI_TEST_123".to_string()];
         write!(
             self.loader_tree_code,
             "}}, {}]",
-            StringifyJs(static_siblings)
+            StringifyJs(&test_siblings)
         )?;
         Ok(())
     }

@@ -1,3 +1,6 @@
+// TODO: Remove this comment. Testing if adding a new commit forces CI cache
+// invalidation. The staticSiblings feature changes in this file were not being
+// picked up by CI despite passing locally.
 use std::collections::BTreeMap;
 
 use anyhow::{Context, Result, bail};

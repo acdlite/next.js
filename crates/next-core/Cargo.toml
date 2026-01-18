@@ -1,3 +1,6 @@
+# TODO: Remove this comment after CI cache is fixed
+# Adding this to force Turbo cache invalidation - our Rust changes to
+# app_structure.rs were not being picked up despite changing the file.
 [package]
 name = "next-core"
 version = "0.1.0"
