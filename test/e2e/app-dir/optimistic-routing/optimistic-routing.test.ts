@@ -335,7 +335,7 @@ describe('optimistic-routing', () => {
 
     // Step 2: Navigate back to home using browser back button
     await browser.back()
-    await browser.elementById('params-history')
+    await browser.elementById('rendered-route-history')
 
     // Step 3: Navigate to /rewritten/second.
     // This link has prefetch={false}. Even though we've "learned" the route
@@ -356,22 +356,17 @@ describe('optimistic-routing', () => {
     // Wait for navigation to complete
     await browser.elementById('actual-page')
 
-    // Verify using params history that no wrong params were rendered.
-    // The history accumulator captures every params change during render.
+    // Verify using rendered route history that no wrong params were rendered.
+    // The history accumulator captures every route state change during render.
     // If route prediction incorrectly used a pattern, we'd see "first"
     // briefly flash before "second".
-    const historyEl = await browser.elementById('params-history')
+    const historyEl = await browser.elementById('rendered-route-history')
     const historyAttr = await historyEl.getAttribute('data-history')
-    const history: string[] = JSON.parse(historyAttr)
+    const history = JSON.parse(historyAttr).map((h: string) => JSON.parse(h))
 
-    // The history should only contain params from actual navigations,
-    // not any intermediate wrong values from incorrect prediction.
-    // Expected: [{}, {slug: "first"}, {}, {slug: "second"}]
-    // The {} entries are from the home page.
     const slugHistory = history
-      .map((h) => JSON.parse(h))
-      .filter((p) => p.slug !== undefined)
-      .map((p) => p.slug)
+      .filter((e: any) => e.params.slug !== undefined)
+      .map((e: any) => e.params.slug)
 
     // We should see exactly [first, second] - no duplicates or wrong values
     expect(slugHistory).toEqual(['first', 'second'])
@@ -405,7 +400,7 @@ describe('optimistic-routing', () => {
 
     // Step 2: Go back to home
     await browser.back()
-    await browser.elementById('params-history')
+    await browser.elementById('rendered-route-history')
 
     // Step 3: Navigate to /search-rewrite?v=beta.
     // This link has prefetch={false} - if the route was incorrectly cached as
@@ -429,5 +424,77 @@ describe('optimistic-routing', () => {
     // If this shows "alpha", the route was incorrectly using a cached pattern.
     const contentBeta = await browser.elementById('rewrite-content')
     expect(await contentBeta.getAttribute('data-content')).toBe('beta')
+  })
+
+  it('static route with catch-all sibling: does not match sub-route against catch-all', async () => {
+    let act: ReturnType<typeof createRouterAct>
+    const browser = await next.browser('/', {
+      beforePageLoad(page) {
+        act = createRouterAct(page)
+      },
+    })
+
+    // Step 1: Prefetch /dashboard/anything/here to learn the catch-all pattern
+    // at the "dashboard" trie level.
+    const revealCatchAll = await browser.elementByCss(
+      'input[data-link-accordion="/dashboard/anything/here"]'
+    )
+    await act(
+      async () => {
+        await revealCatchAll.click()
+      },
+      {
+        includes: 'Loading',
+      }
+    )
+
+    // Step 2: Prefetch /dashboard/settings to populate the static child
+    // "settings" in the trie at the "dashboard" level. At this point the
+    // trie knows about the settings page but not its children (like profile).
+    const revealSettings = await browser.elementByCss(
+      'input[data-link-accordion="/dashboard/settings"]'
+    )
+    await act(
+      async () => {
+        await revealSettings.click()
+      },
+      {
+        includes: 'Loading',
+      }
+    )
+
+    // Step 3: Navigate to /dashboard/settings/profile (prefetch={false}).
+    // The static child "settings" matches at the dashboard level, but its
+    // subtree doesn't yet know about "profile". The matcher should treat the
+    // static match as authoritative and bail out to server resolution rather
+    // than falling through to the catch-all sibling.
+    await act(async () => {
+      const revealProfile = await browser.elementByCss(
+        'input[data-link-accordion="/dashboard/settings/profile"]'
+      )
+      await revealProfile.click()
+    }, 'no-requests')
+
+    const linkProfile = await browser.elementByCss(
+      'a[href="/dashboard/settings/profile"]'
+    )
+    await act(async () => {
+      await linkProfile.click()
+    })
+
+    // Verify the profile page renders correctly after server resolution.
+    const profileTitle = await browser.elementById('profile-title')
+    expect(await profileTitle.text()).toBe('Profile Settings')
+
+    // Check params history to verify no catch-all params were rendered at
+    // any point. If the matcher incorrectly fell through to the catch-all,
+    // the history would contain a "catchall" param entry.
+    const historyEl = await browser.elementById('rendered-route-history')
+    const historyAttr = await historyEl.getAttribute('data-history')
+    const history = JSON.parse(historyAttr).map((h: string) => JSON.parse(h))
+    const catchallEntries = history.filter(
+      (e: any) => e.params.catchall !== undefined
+    )
+    expect(catchallEntries).toEqual([])
   })
 })
