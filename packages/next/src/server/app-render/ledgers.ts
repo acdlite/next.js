@@ -10,14 +10,19 @@ export type Ledger<Entry, Value> =
   | { readonly [builtInLedger]: { entry: Entry; value: Value } }
   | { add(entry: Entry): void; close(): void; readonly value: Value }
 
+export type MinLedger = Ledger<number, AsyncIterable<number>>
 export type SetLedger<T> = Ledger<T, AsyncIterable<T>>
 
 const reactWithLedgers = React as unknown as {
   createSetLedger<T>(): SetLedger<T>
+  createMinLedger(): MinLedger
   captureLedgers<T>(
     data: T,
-    ledgers: readonly [SetLedger<VaryParamId>]
-  ): { data: T; ledgers: [Promise<Set<VaryParamId>>] }
+    ledgers: readonly [SetLedger<VaryParamId>, MinLedger]
+  ): {
+    data: T
+    ledgers: [Promise<Set<VaryParamId>>, Promise<number | undefined>]
+  }
 }
 
 // Only the RSC copy of this module creates built-in identities. Outside RSC,
@@ -29,11 +34,20 @@ export const VaryParamsLedger =
   typeof reactWithLedgers.createSetLedger === 'function'
     ? reactWithLedgers.createSetLedger<VaryParamId>()
     : (null as unknown as SetLedger<VaryParamId>)
+export const StaleTimeLedger =
+  process.env.__NEXT_LEDGERS &&
+  typeof reactWithLedgers.createMinLedger === 'function'
+    ? reactWithLedgers.createMinLedger()
+    : (null as unknown as MinLedger)
 
 export const captureLedgers = reactWithLedgers.captureLedgers
 
 // Each render uses the shared built-in identity, or creates its own userspace
 // accumulator when the flag is off.
+export function createMinLedger(builtIn: MinLedger): MinLedger {
+  return process.env.__NEXT_LEDGERS ? builtIn : new MinLedgerAccumulator()
+}
+
 export function createSetLedger<T>(builtIn: SetLedger<T>): SetLedger<T> {
   return process.env.__NEXT_LEDGERS ? builtIn : new SetLedgerAccumulator<T>()
 }
@@ -123,6 +137,21 @@ class LedgerStream<T> implements AsyncIterable<T> {
         })
       },
     }
+  }
+}
+
+class MinLedgerAccumulator extends LedgerStream<number> {
+  private currentValue: number | undefined = undefined
+
+  add(value: number): void {
+    if (
+      this.done ||
+      (this.currentValue !== undefined && this.currentValue <= value)
+    ) {
+      return
+    }
+    this.currentValue = value
+    this.push(value)
   }
 }
 
