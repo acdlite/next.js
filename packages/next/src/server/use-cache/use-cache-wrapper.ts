@@ -29,7 +29,6 @@ import type {
 import {
   getHmrRefreshHash,
   getResumeDataCache,
-  getVaryParamsAccumulator,
   workUnitAsyncStorage,
   getDraftModeProviderForCacheScope,
   getCacheSignal,
@@ -37,7 +36,7 @@ import {
   getServerComponentsHmrCache,
   willConsumerServerCache,
 } from '../app-render/work-unit-async-storage.external'
-import { accumulateVaryParam } from '../app-render/vary-params'
+import { accumulateRootVaryParamForWorkUnit } from '../app-render/vary-params'
 
 import {
   applyOwnerStack,
@@ -1093,13 +1092,11 @@ function propagateCacheEntryMetadata(
   }
 
   if (metadata.readRootParamNames) {
-    const varyParamsAccumulator = getVaryParamsAccumulator(
-      cacheContext.outerWorkUnitStore
-    )
-    if (varyParamsAccumulator) {
-      for (const paramName of metadata.readRootParamNames) {
-        accumulateVaryParam(varyParamsAccumulator.rootParams, paramName)
-      }
+    for (const paramName of metadata.readRootParamNames) {
+      accumulateRootVaryParamForWorkUnit(
+        cacheContext.outerWorkUnitStore,
+        paramName
+      )
     }
   }
 }
