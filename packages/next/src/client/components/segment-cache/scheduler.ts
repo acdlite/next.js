@@ -1,6 +1,4 @@
-import { matchSegment } from '../match-segments'
-import { urlSearchParamsToParsedUrlQuery } from '../../route-params'
-import { getRenderedSearchFromVaryPath } from './vary-path'
+import { compareParams, ParamsChange } from './vary-path'
 import type {
   FlightRouterState,
   CacheNode,
@@ -24,6 +22,7 @@ import {
   type PendingSegmentCacheEntry,
   type SegmentCacheEntry,
   convertRouteTreeToFlightRouterState,
+  doesRouteStructureMatch,
   readOrCreateRevalidatingSegmentEntry,
   upgradeToPendingSegment,
   overwriteRevalidatingSegmentCacheEntry,
@@ -45,7 +44,6 @@ import {
 } from './cache'
 import type { CacheMap } from './cache-map'
 import type { NavigationLockPrefetch } from './navigation-testing-lock'
-import { PAGE_SEGMENT_KEY } from '../../../shared/lib/segment'
 import {
   HEAD_REQUEST_KEY,
   type SegmentRequestKey,
@@ -1394,7 +1392,9 @@ function pingSharedPartOfCacheComponentsTree(
       let childExitStatus
       if (
         oldTreeChild !== undefined &&
-        doesCurrentSegmentMatchCachedSegment(route, oldTreeChild, newTreeChild)
+        doesRouteStructureMatch(oldTreeChild, newTreeChild) &&
+        compareParams(oldTreeChild.varyPath, newTreeChild.varyPath) ===
+          ParamsChange.None
       ) {
         // We're still in the "shared" part of the tree.
         childExitStatus = pingSharedPartOfCacheComponentsTree(
@@ -1618,7 +1618,9 @@ function diffRouteTreeAgainstCurrent(
       const oldTreeChild = oldSlots?.get(parallelRouteKey)
       if (
         oldTreeChild !== undefined &&
-        doesCurrentSegmentMatchCachedSegment(route, oldTreeChild, newTreeChild)
+        doesRouteStructureMatch(oldTreeChild, newTreeChild) &&
+        compareParams(oldTreeChild.varyPath, newTreeChild.varyPath) ===
+          ParamsChange.None
       ) {
         // This segment is already part of the current route. Keep traversing.
         const requestTreeChild = diffRouteTreeAgainstCurrent(
@@ -2631,36 +2633,6 @@ function pingFullSegmentRevalidation(
         return null
     }
   }
-}
-
-function doesCurrentSegmentMatchCachedSegment(
-  route: FulfilledRouteCacheEntry,
-  currentTree: RouteTree<CacheNode>,
-  cachedTree: RouteTree<null>
-): boolean {
-  if (!matchSegment(currentTree.segment, cachedTree.segment)) {
-    return false
-  }
-  if (cachedTree.segment === PAGE_SEGMENT_KEY) {
-    // Preserve the legacy PAGE comparison: a page with search params is part
-    // of the new tree, even when the current and target queries are equal.
-    // The old comparator received its segment arguments in reverse order;
-    // correcting that behavior is separate from this structural refactor.
-    const currentSearch = getRenderedSearchFromVaryPath(currentTree.varyPath)
-    return (
-      Object.keys(
-        urlSearchParamsToParsedUrlQuery(
-          new URLSearchParams(currentSearch ?? '')
-        )
-      ).length === 0 &&
-      Object.keys(
-        urlSearchParamsToParsedUrlQuery(
-          new URLSearchParams(route.renderedSearch)
-        )
-      ).length === 0
-    )
-  }
-  return true
 }
 
 /**

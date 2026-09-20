@@ -7,7 +7,11 @@ import type {
 import type { RouteTree } from './cache'
 import { Fallback, type FallbackType } from './cache-map'
 import type { SegmentRequestKey } from '../../../shared/lib/segment-cache/segment-value-encoding'
-import { SEARCH_PARAMS_VARY_ID } from '../../../shared/lib/segment-cache/vary-params-decoding'
+import {
+  readVaryParams,
+  SEARCH_PARAMS_VARY_ID,
+  type VaryParams,
+} from '../../../shared/lib/segment-cache/vary-params-decoding'
 
 type Opaque<T, K> = T & { __brand: K }
 
@@ -321,24 +325,93 @@ export function getRenderedSearchFromVaryPath(
   return null
 }
 
-export function didVaryPathChange(
+/**
+ * The kind of param change between two vary paths at the same route position.
+ * By id, a vary path is `requestKey (null) -> [search params
+ * (SEARCH_PARAMS_VARY_ID)] -> path params (param name)…`. A path param change
+ * outranks a search params change: a path param is part of LayoutRouter's
+ * React key, so the segment remounts whether or not the search string
+ * changed too.
+ */
+export const enum ParamsChange {
+  None,
+  SearchParams,
+  PathParam,
+}
+
+export function compareParams(
   currentVaryPath: VaryPath,
   nextVaryPath: VaryPath
-): boolean {
-  // Compares two vary paths entry by entry: the request key, then the search
-  // params if the segment varies on them, then every path param. The paths
-  // belong to the same segment at the same route position, so they have the
-  // same layout; a request key mismatch is caught at the first entry.
+): ParamsChange {
+  // Both paths belong to the same segment at the same route position, so they
+  // list the same inputs in the same order. Walk them in lockstep,
+  // comparing every path param the segment renders under, including inherited
+  // ones: the traversal continues below a layout whose param value changed, so
+  // an ancestor's value is not guaranteed to match at this point.
   let current: VaryPathNode | null = currentVaryPath
   let next: VaryPathNode | null = nextVaryPath
+  let change = ParamsChange.None
   while (current !== null && next !== null) {
     if (current.value !== next.value) {
-      return true
+      const id = current.id
+      if (id === null) {
+        // The request key: equal at the same route position, and callers
+        // compare positions before params.
+      } else if (id === SEARCH_PARAMS_VARY_ID) {
+        change = ParamsChange.SearchParams
+      } else {
+        return ParamsChange.PathParam
+      }
     }
     current = current.parent
     next = next.parent
   }
-  return current !== next
+  return change
+}
+
+export function didReadChangedParam(
+  currentVaryPath: VaryPath,
+  nextVaryPath: VaryPath,
+  varyParams: VaryParams | null
+): boolean {
+  // Whether output rendered under `currentVaryPath` read a param whose value
+  // differs under `nextVaryPath`, so it would have to be re-rendered there.
+  // `varyParams` is the output's dependency source; null means unknown.
+  //
+  // Both paths belong to the same segment at the same route position, so they
+  // list the same inputs in the same order. Walk them in lockstep and
+  // read the dependency set only when a param actually differs — at most once.
+  let current: VaryPathNode | null = currentVaryPath
+  let next: VaryPathNode | null = nextVaryPath
+  let total: Set<string> | null = null
+  while (current !== null && next !== null) {
+    if (current.value !== next.value) {
+      const id = current.id
+      if (id === null) {
+        // The request key: equal at the same route position, and callers
+        // compare positions before params.
+      } else {
+        if (total === null) {
+          if (varyParams === null) {
+            // No dependency information: assume the output depends on it.
+            return true
+          }
+          total = readVaryParams(varyParams)
+          if (total === null) {
+            // The render that produced this output hasn't finished reporting
+            // (or aborted). Same assumption.
+            return true
+          }
+        }
+        if (total.has(id)) {
+          return true
+        }
+      }
+    }
+    current = current.parent
+    next = next.parent
+  }
+  return false
 }
 
 export function getFulfilledSegmentVaryPath(

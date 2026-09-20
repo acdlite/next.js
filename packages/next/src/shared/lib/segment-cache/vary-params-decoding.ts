@@ -12,7 +12,7 @@ import { readFulfilledValue } from '../rsc-transport'
  * them is reported under this one id and the segment is keyed by the whole
  * query string. The server reports it (see createVaryingSearchParams in
  * app-render/vary-params.ts) and the client's vary paths carry it, so the two
- * sides agree when a vary path is re-keyed from the reported set.
+ * sides agree when didReadChangedParam looks the id up in the reported set.
  */
 export const SEARCH_PARAMS_VARY_ID = '?'
 
