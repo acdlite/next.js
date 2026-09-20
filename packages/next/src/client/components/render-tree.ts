@@ -46,7 +46,7 @@ import type { NormalizedSearch } from './segment-cache/cache-key'
 import type { CacheMap } from './segment-cache/cache-map'
 import {
   getRenderedSearchFromVaryPath,
-  type PageVaryPath,
+  type VaryPath,
 } from './segment-cache/vary-path'
 import {
   readFromBFCache,
@@ -220,7 +220,7 @@ export function startPPRNavigation(
   oldCacheNode: CacheNode | null,
   oldRouterState: FlightRouterState,
   newRouteTree: RouteTree<RSCSegmentData | null>,
-  newMetadataVaryPath: PageVaryPath | null,
+  newMetadataVaryPath: VaryPath | null,
   freshness: FreshnessPolicy,
   seedHead: HeadData | null,
   seedDynamicStaleAt: number,
@@ -265,7 +265,7 @@ function updateCacheNodeOnNavigation(
   oldCacheNode: CacheNode | void,
   oldRouterState: FlightRouterState,
   newRouteTree: RouteTree<RSCSegmentData | null>,
-  newMetadataVaryPath: PageVaryPath | null,
+  newMetadataVaryPath: VaryPath | null,
   freshness: FreshnessPolicy,
   seedHead: HeadData | null,
   seedDynamicStaleAt: number,
@@ -657,7 +657,7 @@ function accumulateScrollRef(
 function createCacheNodeOnNavigation(
   navigatedAt: number,
   newRouteTree: RouteTree<RSCSegmentData | null>,
-  newMetadataVaryPath: PageVaryPath | null,
+  newMetadataVaryPath: VaryPath | null,
   freshness: FreshnessPolicy,
   seedHead: HeadData | null,
   seedDynamicStaleAt: number,
@@ -781,7 +781,7 @@ function createCacheNodeOnNavigation(
 function createSegmentFromRouteTree(
   newRouteTree: RouteTree<RSCSegmentData | null>
 ): Segment {
-  if (newRouteTree.isPage) {
+  if (newRouteTree.segment === PAGE_SEGMENT_KEY) {
     // In a dynamic server response, the server embeds the search params into
     // the segment key, but in a static one it's omitted. The client handles
     // this inconsistency by adding the search params back right at the end.
@@ -954,7 +954,7 @@ function createCacheNodeForSegment(
   now: number,
   tree: RouteTree<RSCSegmentData | null>,
   seedRsc: React.ReactNode | null,
-  metadataVaryPath: PageVaryPath | null,
+  metadataVaryPath: VaryPath | null,
   seedHead: HeadData | null,
   freshness: FreshnessPolicy,
   dynamicStaleAt: number,
@@ -979,7 +979,7 @@ function createCacheNodeForSegment(
   // also be able to use that data without spawning a new request. (This is
   // referred to as the "seed" data.)
 
-  const isPage = tree.isPage
+  const isPage = tree.segment === PAGE_SEGMENT_KEY
 
   // During certain kinds of navigations, we may be able to render from
   // the BFCache.

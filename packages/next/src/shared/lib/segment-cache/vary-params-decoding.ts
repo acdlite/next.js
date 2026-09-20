@@ -6,6 +6,16 @@
 
 import { readFulfilledValue } from '../rsc-transport'
 
+/**
+ * The vary path id of the search params entry. Path params are identified by
+ * their param name; search params have no fixed schema, so every access to
+ * them is reported under this one id and the segment is keyed by the whole
+ * query string. The server reports it (see createVaryingSearchParams in
+ * app-render/vary-params.ts) and the client's vary paths carry it, so the two
+ * sides agree when a vary path is re-keyed from the reported set.
+ */
+export const SEARCH_PARAMS_VARY_ID = '?'
+
 export type VaryParams = Set<string>
 
 /**

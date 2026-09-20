@@ -45,6 +45,7 @@
 
 import type { DynamicParamTypesShort } from '../../../shared/lib/app-router-types'
 import { PrefetchHint } from '../../../shared/lib/app-router-types'
+import { PAGE_SEGMENT_KEY } from '../../../shared/lib/segment'
 import type {
   RouteTree,
   RSCSegmentData,
@@ -67,12 +68,11 @@ import type { NormalizedPathname, NormalizedSearch } from './cache-key'
 import { splitPathnameIntoParts } from './cache-key'
 import {
   appendLayoutVaryPath,
-  finalizeLayoutVaryPath,
-  finalizePageVaryPath,
   finalizeMetadataVaryPath,
+  finalizeVaryPath,
   getShellSegmentVaryPath,
-  type PartialSegmentVaryPath,
-  type PageVaryPath,
+  type PartialVaryPath,
+  type VaryPath,
 } from './vary-path'
 
 /**
@@ -228,7 +228,7 @@ export function discoverKnownRoute(
   nextUrl: string | null,
   pendingEntry: PendingRouteCacheEntry | null,
   routeTree: RouteTree<RSCSegmentData | null>,
-  metadataVaryPath: PageVaryPath,
+  metadataVaryPath: VaryPath,
   couldBeIntercepted: boolean,
   canonicalUrl: string,
   supportsPerSegmentPrefetching: boolean,
@@ -309,7 +309,7 @@ function handleMismatchDueToRewrite(
   search: NormalizedSearch,
   nextUrl: string | null,
   fullTree: RouteTree<RSCSegmentData | null>,
-  metadataVaryPath: PageVaryPath,
+  metadataVaryPath: VaryPath,
   couldBeIntercepted: boolean,
   canonicalUrl: string,
   supportsPerSegmentPrefetching: boolean
@@ -381,7 +381,7 @@ function discoverKnownRoutePart(
   search: NormalizedSearch,
   nextUrl: string | null,
   fullTree: RouteTree<RSCSegmentData | null>,
-  metadataVaryPath: PageVaryPath,
+  metadataVaryPath: VaryPath,
   couldBeIntercepted: boolean,
   canonicalUrl: string,
   supportsPerSegmentPrefetching: boolean,
@@ -996,7 +996,7 @@ function matchKnownRoutePart(
  * (parallel routes may have multiple pages, but metadata uses the first).
  */
 type ReifyAccumulator = {
-  metadataVaryPath: PageVaryPath | null
+  metadataVaryPath: VaryPath | null
 }
 
 /**
@@ -1014,7 +1014,7 @@ function reifyRouteTree(
   pattern: RouteTree<null>,
   resolvedParams: ResolvedParams,
   search: NormalizedSearch,
-  parentPartialVaryPath: PartialSegmentVaryPath | null,
+  parentPartialVaryPath: PartialVaryPath | null,
   acc: ReifyAccumulator
 ): RouteTree<null> {
   const originalSegment = pattern.segment
@@ -1025,7 +1025,7 @@ function reifyRouteTree(
     (pattern.prefetchHints & PrefetchHint.IsRootLayoutOrAbove) !== 0
 
   let newSegment = originalSegment
-  let partialVaryPath: PartialSegmentVaryPath | null
+  let partialVaryPath: PartialVaryPath | null
 
   if (typeof originalSegment !== 'string') {
     // Dynamic segment: compute new cache key and append to partial vary path
@@ -1073,13 +1073,10 @@ function reifyRouteTree(
     }
   }
 
-  if (pattern.isPage) {
+  let newVaryPath: VaryPath
+  if (originalSegment === PAGE_SEGMENT_KEY) {
     // Page segment: finalize with search params
-    const newVaryPath = finalizePageVaryPath(
-      pattern.requestKey,
-      search,
-      partialVaryPath
-    )
+    newVaryPath = finalizeVaryPath(pattern.requestKey, search, partialVaryPath)
     // Collect metadata vary path (first page wins, same as original algorithm)
     if (acc.metadataVaryPath === null) {
       acc.metadataVaryPath = finalizeMetadataVaryPath(
@@ -1088,36 +1085,21 @@ function reifyRouteTree(
         partialVaryPath
       )
     }
-    return {
-      requestKey: pattern.requestKey,
-      segment: newSegment,
-      shellVaryPath: getShellSegmentVaryPath(newVaryPath),
-      refreshState: pattern.refreshState,
-      // Route cache patterns never carry seed data (see
-      // stripDataFromRouteTree), so neither do trees reified from them.
-      data: null,
-      varyPath: newVaryPath,
-      isPage: true,
-      slots: newSlots,
-      prefetchHints: pattern.prefetchHints,
-    }
   } else {
     // Layout segment: finalize without search params
-    const newVaryPath = finalizeLayoutVaryPath(
-      pattern.requestKey,
-      partialVaryPath
-    )
-    return {
-      requestKey: pattern.requestKey,
-      segment: newSegment,
-      shellVaryPath: getShellSegmentVaryPath(newVaryPath),
-      refreshState: pattern.refreshState,
-      data: null,
-      varyPath: newVaryPath,
-      isPage: false,
-      slots: newSlots,
-      prefetchHints: pattern.prefetchHints,
-    }
+    newVaryPath = finalizeVaryPath(pattern.requestKey, null, partialVaryPath)
+  }
+  return {
+    requestKey: pattern.requestKey,
+    segment: newSegment,
+    shellVaryPath: getShellSegmentVaryPath(newVaryPath),
+    refreshState: pattern.refreshState,
+    // Route cache patterns never carry seed data (see
+    // stripDataFromRouteTree), so neither do trees reified from them.
+    data: null,
+    varyPath: newVaryPath,
+    slots: newSlots,
+    prefetchHints: pattern.prefetchHints,
   }
 }
 

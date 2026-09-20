@@ -4,6 +4,7 @@ import {
   getVaryParamsAccumulator,
   workUnitAsyncStorage,
 } from './work-unit-async-storage.external'
+import { SEARCH_PARAMS_VARY_ID } from '../../shared/lib/segment-cache/vary-params-decoding'
 
 /**
  * Accumulates vary params for a single segment (or for metadata/rootParams).
@@ -261,23 +262,23 @@ export function createVaryingSearchParams(
   // checks, or enumeration — must register as varying. A Proxy is required
   // (rather than per-property getters) so that enumeration of an empty
   // searchParams object still triggers a vary. All accesses bucket into the
-  // single sentinel '?'; the segment is keyed by the whole query string.
+  // single search params id; the segment is keyed by the whole query string.
   // TODO: Split into per-param tracking if the cache key evolves.
   return new Proxy(originalSearchParamsObject, {
     get(target, prop, receiver) {
       if (typeof prop === 'string') {
-        accumulateVaryParam(accumulator, '?')
+        accumulateVaryParam(accumulator, SEARCH_PARAMS_VARY_ID)
       }
       return Reflect.get(target, prop, receiver)
     },
     has(target, prop) {
       if (typeof prop === 'string') {
-        accumulateVaryParam(accumulator, '?')
+        accumulateVaryParam(accumulator, SEARCH_PARAMS_VARY_ID)
       }
       return Reflect.has(target, prop)
     },
     ownKeys(target) {
-      accumulateVaryParam(accumulator, '?')
+      accumulateVaryParam(accumulator, SEARCH_PARAMS_VARY_ID)
       return Reflect.ownKeys(target)
     },
   })
