@@ -2,6 +2,7 @@ import type { CacheNode, Segment } from '../../../shared/lib/app-router-types'
 import type React from 'react'
 import { PrefetchHint } from '../../../shared/lib/app-router-types'
 import {
+  readVaryParams,
   SEARCH_PARAMS_VARY_ID,
   type VaryParams,
 } from '../../../shared/lib/segment-cache/vary-params-decoding'
@@ -178,10 +179,9 @@ export type RSCSegmentData = {
    */
   isPartial: boolean
   /**
-   * The params this segment's output depends on (root params already
-   * unioned in), drained from the response's wire iterables at decode. Null
-   * means unknown — tracking wasn't enabled, or the decode had no root
-   * params to union in — so consumers key on all params.
+   * The source of the params this segment's output depends on (root params
+   * included). Null means unknown — tracking wasn't enabled, or the decode
+   * had no root params to union in — so consumers key on all params.
    */
   varyParams: VaryParams | null
   /**
@@ -3401,7 +3401,7 @@ function writeSegmentDataIntoCache(
   rsc: React.ReactNode,
   isPartial: boolean,
   staleAt: number,
-  segmentVaryParams: Set<string> | null,
+  segmentVaryParams: VaryParams | null,
   tree: RouteTree<RSCSegmentData | null>,
   spawnedEntries: Map<SegmentRequestKey, PendingSegmentCacheEntry> | null,
   // The strategy tier describing the CONTENT of the payload this write came
@@ -3519,41 +3519,46 @@ function writeSegmentDataIntoCache(
     payloadStrategy !== FetchStrategy.Full &&
     segmentVaryParams !== null
   ) {
-    let varyParams = segmentVaryParams
-    if (
-      payloadStrategy === FetchStrategy.RuntimeShell &&
-      varyParams.has(SEARCH_PARAMS_VARY_ID)
-    ) {
-      // SPECIAL CASE: for a RuntimeShell payload, the search params entry
-      // is dropped from the server's vary evidence before deriving the
-      // key, so the search component of the resulting path is marked as
-      // the fallback. This exists ONLY because of a known compromise in
-      // how the server reports search params: accessing `searchParams`
-      // records a dependency on them at access time, even when the render
-      // suspends on that access and cuts the content at the param
-      // fallback. A shell render's page and head segments therefore report
-      // the search params while the emitted bytes contain no
-      // search-dependent content.
-      // Trusting that report would key shell-grade content at a concrete
-      // search value, where shell-restricted reads (which generalize every
-      // non-root param — see getShellSegmentVaryPath) can never find it. A
-      // RuntimeShell payload's search-dependent content is reduced to
-      // fallbacks by construction, so its key must not vary on search
-      // regardless of the over-reported evidence. Every other component of
-      // the evidence is still honored as-is.
-      //
-      // Nothing else should rely on this branch; for every other payload
-      // grade — and every other param — the server's evidence
-      // is authoritative.
-      //
-      // TODO: Reconsider special-casing this on the server instead: don't
-      // report a param access that never resolved past the fallback cut in
-      // the emitted stage. A shell payload's evidence would then be
-      // accurate, and this branch could be deleted.
-      varyParams = new Set(varyParams)
-      varyParams.delete(SEARCH_PARAMS_VARY_ID)
+    // Read the reported set now, when the key is chosen. The payload is fully
+    // buffered by the time it's written, so the source has settled; a read of
+    // null means the report is unavailable and every param varies.
+    let varyParams = readVaryParams(segmentVaryParams)
+    if (varyParams !== null) {
+      if (
+        payloadStrategy === FetchStrategy.RuntimeShell &&
+        varyParams.has(SEARCH_PARAMS_VARY_ID)
+      ) {
+        // SPECIAL CASE: for a RuntimeShell payload, the search params entry
+        // is dropped from the server's vary evidence before deriving the
+        // key, so the search component of the resulting path is marked as
+        // the fallback. This exists ONLY because of a known compromise in
+        // how the server reports search params: accessing `searchParams`
+        // records a dependency on them at access time, even when the render
+        // suspends on that access and cuts the content at the param
+        // fallback. A shell render's page and head segments therefore report
+        // the search params while the emitted bytes contain no
+        // search-dependent content.
+        // Trusting that report would key shell-grade content at a concrete
+        // search value, where shell-restricted reads (which generalize every
+        // non-root param — see getShellSegmentVaryPath) can never find it. A
+        // RuntimeShell payload's search-dependent content is reduced to
+        // fallbacks by construction, so its key must not vary on search
+        // regardless of the over-reported evidence. Every other component of
+        // the evidence is still honored as-is.
+        //
+        // Nothing else should rely on this branch; for every other payload
+        // grade — and every other param — the server's evidence
+        // is authoritative.
+        //
+        // TODO: Reconsider special-casing this on the server instead: don't
+        // report a param access that never resolved past the fallback cut in
+        // the emitted stage. A shell payload's evidence would then be
+        // accurate, and this branch could be deleted.
+        varyParams = new Set(varyParams)
+        varyParams.delete(SEARCH_PARAMS_VARY_ID)
+      }
+      fulfilledVaryPath = getFulfilledSegmentVaryPath(tree.varyPath, varyParams)
     }
-    fulfilledVaryPath = getFulfilledSegmentVaryPath(tree.varyPath, varyParams)
   }
 
   // The canonical path to (re-)key the entry at. When the derivation above
