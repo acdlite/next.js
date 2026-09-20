@@ -1185,4 +1185,113 @@ describe('segment cache - vary params', () => {
       )
     }
   })
+
+  // @gate ledgers
+  it('does not prefetch a layout that did not read a path param when the navigation would keep it', async () => {
+    let page!: Playwright.Page
+    const startDate = Date.now()
+    const browser = await next.browser(
+      '/navigation-reuse/static-layout-param/a',
+      {
+        async beforePageLoad(p: Playwright.Page) {
+          page = p
+          await page.clock.install()
+          await page.clock.setFixedTime(startDate)
+        },
+      }
+    )
+    const act = createRouterAct(page)
+    expect(await browser.elementById('page-id').text()).toBe('Page id: a')
+
+    // The initial load wrote the layout into the prefetch cache, keyed so
+    // that every id can reuse it. Let that expire, so the prefetch below has
+    // to fetch again anything it still wants.
+    await page.clock.setFixedTime(startDate + 60 * 60 * 1000)
+
+    // Only the page read the param. The navigation will keep the layout's
+    // current data, so the prefetch fetches the page but not the layout, even
+    // though nothing in the cache can serve the layout anymore.
+    await act(async () => {
+      await browser
+        .elementByCss(
+          'input[data-link-accordion="/navigation-reuse/static-layout-param/b"]'
+        )
+        .click()
+    }, [
+      { includes: 'Static page header' },
+      { includes: 'Static layout above id', block: 'reject' },
+    ])
+  })
+
+  // @gate ledgers
+  it('does not prefetch the head when it did not read a path param and the navigation would keep it', async () => {
+    let page!: Playwright.Page
+    const startDate = Date.now()
+    const browser = await next.browser(
+      '/navigation-reuse/static-layout-param/a',
+      {
+        async beforePageLoad(p: Playwright.Page) {
+          page = p
+          await page.clock.install()
+          await page.clock.setFixedTime(startDate)
+        },
+      }
+    )
+    const act = createRouterAct(page)
+    expect(await browser.eval('document.title')).toBe(
+      'Static head for every id'
+    )
+
+    // The initial load wrote the head into the prefetch cache, keyed so that
+    // every id can reuse it. Let that expire, so the prefetch below has to
+    // fetch again anything it still wants.
+    await page.clock.setFixedTime(startDate + 60 * 60 * 1000)
+
+    // Only the page read the param. The navigation will keep the current
+    // head, so the prefetch fetches the page but not the head, even though
+    // nothing in the cache can serve the head anymore.
+    await act(async () => {
+      await browser
+        .elementByCss(
+          'input[data-link-accordion="/navigation-reuse/static-layout-param/b"]'
+        )
+        .click()
+    }, [
+      { includes: 'Static page header' },
+      { includes: 'Static head for every id', block: 'reject' },
+    ])
+  })
+
+  // @gate ledgers
+  it('starts a full prefetch at the page when the navigation would keep the dynamic layout above it', async () => {
+    let act: ReturnType<typeof createRouterAct>
+    const browser = await next.browser('/navigation-reuse/layout-param/a', {
+      beforePageLoad(page: Playwright.Page) {
+        act = createRouterAct(page)
+      },
+    })
+    const layoutToken = await browser.elementById('layout-token').text()
+
+    // The link to c is a full prefetch. Only the page read the param, so the
+    // runtime request starts at the page; the layout is not re-rendered.
+    await act(async () => {
+      await browser
+        .elementByCss(
+          'input[data-link-accordion="/navigation-reuse/layout-param/c"]'
+        )
+        .click()
+    }, [
+      { includes: 'Page id: c' },
+      { includes: 'Layout token', block: 'reject' },
+    ])
+
+    // The prefetch fetched everything the navigation needs.
+    await act(async () => {
+      await browser
+        .elementByCss('a[href="/navigation-reuse/layout-param/c"]')
+        .click()
+    }, 'no-requests')
+    expect(await browser.elementById('layout-token').text()).toBe(layoutToken)
+    expect(await browser.elementById('page-id').text()).toBe('Page id: c')
+  })
 })
