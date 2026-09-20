@@ -48,6 +48,7 @@ import { PrefetchHint } from '../../../shared/lib/app-router-types'
 import { PAGE_SEGMENT_KEY } from '../../../shared/lib/segment'
 import type {
   RouteTree,
+  RootRouteTree,
   RSCSegmentData,
   FulfilledRouteCacheEntry,
 } from './cache'
@@ -58,6 +59,7 @@ import {
   getCurrentRouteCacheVersion,
   type PendingRouteCacheEntry,
   createMetadataRouteTree,
+  getHeadRequestKey,
 } from './cache'
 import { isValueExpired } from './cache-map'
 import {
@@ -68,7 +70,6 @@ import type { NormalizedPathname, NormalizedSearch } from './cache-key'
 import { splitPathnameIntoParts } from './cache-key'
 import {
   appendLayoutVaryPath,
-  finalizeMetadataVaryPath,
   finalizeVaryPath,
   getShellSegmentVaryPath,
   type PartialVaryPath,
@@ -227,14 +228,14 @@ export function discoverKnownRoute(
   search: NormalizedSearch,
   nextUrl: string | null,
   pendingEntry: PendingRouteCacheEntry | null,
-  routeTree: RouteTree<RSCSegmentData | null>,
-  metadataVaryPath: VaryPath,
+  root: RootRouteTree<RSCSegmentData | null>,
   couldBeIntercepted: boolean,
   canonicalUrl: string,
+  renderedSearch: NormalizedSearch,
   supportsPerSegmentPrefetching: boolean,
   hasDynamicRewrite: boolean
 ): FulfilledRouteCacheEntry {
-  const tree = routeTree
+  const tree = root.tree
 
   const pathnameParts = splitPathnameIntoParts(pathname)
 
@@ -243,10 +244,10 @@ export function discoverKnownRoute(
     const fulfilledEntry = fulfillRouteCacheEntry(
       now,
       pendingEntry,
-      tree,
-      metadataVaryPath,
+      root,
       couldBeIntercepted,
       canonicalUrl,
+      renderedSearch,
       supportsPerSegmentPrefetching
     )
     if (hasDynamicRewrite) {
@@ -265,10 +266,10 @@ export function discoverKnownRoute(
       pathname,
       search,
       nextUrl,
-      tree,
-      metadataVaryPath,
+      root,
       couldBeIntercepted,
       canonicalUrl,
+      renderedSearch,
       supportsPerSegmentPrefetching,
       hasDynamicRewrite
     )
@@ -287,10 +288,10 @@ export function discoverKnownRoute(
     pathname,
     search,
     nextUrl,
-    tree,
-    metadataVaryPath,
+    root,
     couldBeIntercepted,
     canonicalUrl,
+    renderedSearch,
     supportsPerSegmentPrefetching,
     hasDynamicRewrite
   )
@@ -308,10 +309,10 @@ function handleMismatchDueToRewrite(
   pathname: string,
   search: NormalizedSearch,
   nextUrl: string | null,
-  fullTree: RouteTree<RSCSegmentData | null>,
-  metadataVaryPath: VaryPath,
+  root: RootRouteTree<RSCSegmentData | null>,
   couldBeIntercepted: boolean,
   canonicalUrl: string,
+  renderedSearch: NormalizedSearch,
   supportsPerSegmentPrefetching: boolean
 ): FulfilledRouteCacheEntry {
   if (existingEntry !== null) {
@@ -322,10 +323,10 @@ function handleMismatchDueToRewrite(
     pathname as NormalizedPathname,
     search,
     nextUrl,
-    fullTree,
-    metadataVaryPath,
+    root,
     couldBeIntercepted,
     canonicalUrl,
+    renderedSearch,
     supportsPerSegmentPrefetching
   )
 }
@@ -380,10 +381,10 @@ function discoverKnownRoutePart(
   pathname: string,
   search: NormalizedSearch,
   nextUrl: string | null,
-  fullTree: RouteTree<RSCSegmentData | null>,
-  metadataVaryPath: VaryPath,
+  root: RootRouteTree<RSCSegmentData | null>,
   couldBeIntercepted: boolean,
   canonicalUrl: string,
+  renderedSearch: NormalizedSearch,
   supportsPerSegmentPrefetching: boolean,
   hasDynamicRewrite: boolean
 ): FulfilledRouteCacheEntry {
@@ -407,10 +408,10 @@ function discoverKnownRoutePart(
           pathname,
           search,
           nextUrl,
-          fullTree,
-          metadataVaryPath,
+          root,
           couldBeIntercepted,
           canonicalUrl,
+          renderedSearch,
           supportsPerSegmentPrefetching
         )
       }
@@ -448,10 +449,10 @@ function discoverKnownRoutePart(
         pathname,
         search,
         nextUrl,
-        fullTree,
-        metadataVaryPath,
+        root,
         couldBeIntercepted,
         canonicalUrl,
+        renderedSearch,
         supportsPerSegmentPrefetching
       )
     }
@@ -469,10 +470,10 @@ function discoverKnownRoutePart(
         pathname,
         search,
         nextUrl,
-        fullTree,
-        metadataVaryPath,
+        root,
         couldBeIntercepted,
         canonicalUrl,
+        renderedSearch,
         supportsPerSegmentPrefetching
       )
     }
@@ -498,10 +499,10 @@ function discoverKnownRoutePart(
             pathname,
             search,
             nextUrl,
-            fullTree,
-            metadataVaryPath,
+            root,
             couldBeIntercepted,
             canonicalUrl,
+            renderedSearch,
             supportsPerSegmentPrefetching
           )
         }
@@ -524,10 +525,10 @@ function discoverKnownRoutePart(
             pathname,
             search,
             nextUrl,
-            fullTree,
-            metadataVaryPath,
+            root,
             couldBeIntercepted,
             canonicalUrl,
+            renderedSearch,
             supportsPerSegmentPrefetching
           )
         }
@@ -565,10 +566,10 @@ function discoverKnownRoutePart(
         pathname,
         search,
         nextUrl,
-        fullTree,
-        metadataVaryPath,
+        root,
         couldBeIntercepted,
         canonicalUrl,
+        renderedSearch,
         supportsPerSegmentPrefetching
       )
     }
@@ -632,10 +633,10 @@ function discoverKnownRoutePart(
         pathname,
         search,
         nextUrl,
-        fullTree,
-        metadataVaryPath,
+        root,
         couldBeIntercepted,
         canonicalUrl,
+        renderedSearch,
         supportsPerSegmentPrefetching,
         hasDynamicRewrite
       )
@@ -654,10 +655,10 @@ function discoverKnownRoutePart(
       pathname,
       search,
       nextUrl,
-      fullTree,
-      metadataVaryPath,
+      root,
       couldBeIntercepted,
       canonicalUrl,
+      renderedSearch,
       supportsPerSegmentPrefetching
     )
   }
@@ -672,10 +673,10 @@ function discoverKnownRoutePart(
       pathname,
       search,
       nextUrl,
-      fullTree,
-      metadataVaryPath,
+      root,
       couldBeIntercepted,
       canonicalUrl,
+      renderedSearch,
       supportsPerSegmentPrefetching
     )
   }
@@ -704,10 +705,10 @@ function discoverKnownRoutePart(
       pathname as NormalizedPathname,
       search,
       nextUrl,
-      fullTree,
-      metadataVaryPath,
+      root,
       couldBeIntercepted,
       canonicalUrl,
+      renderedSearch,
       supportsPerSegmentPrefetching
     )
   }
@@ -770,7 +771,7 @@ export function matchKnownRoute(
   // segments and recomputes vary paths for correct segment cache keying.
   const acc: ReifyAccumulator = { metadataVaryPath: null }
   const reifiedTree = reifyRouteTree(
-    pattern.tree,
+    pattern.root.tree,
     resolvedParams,
     search,
     null, // Start with null partial vary path at the root
@@ -787,7 +788,8 @@ export function matchKnownRoute(
   }
   const reifiedMetadata = createMetadataRouteTree(
     metadataVaryPath,
-    reifiedTree.prefetchHints
+    reifiedTree.prefetchHints,
+    null
   )
 
   // Create a synthetic (predicted) entry and store it as the new pattern.
@@ -801,8 +803,7 @@ export function matchKnownRoute(
     canonicalUrl: pathname + search,
     status: EntryStatus.Fulfilled,
     blockedTasks: null,
-    tree: reifiedTree,
-    metadata: reifiedMetadata,
+    root: { tree: reifiedTree, head: reifiedMetadata },
     couldBeIntercepted: pattern.couldBeIntercepted,
     supportsPerSegmentPrefetching: pattern.supportsPerSegmentPrefetching,
     hasDynamicRewrite: false,
@@ -1077,10 +1078,10 @@ function reifyRouteTree(
   if (originalSegment === PAGE_SEGMENT_KEY) {
     // Page segment: finalize with search params
     newVaryPath = finalizeVaryPath(pattern.requestKey, search, partialVaryPath)
-    // Collect metadata vary path (first page wins, same as original algorithm)
+    // Collect metadata vary path (first page wins; see getHeadRequestKey)
     if (acc.metadataVaryPath === null) {
-      acc.metadataVaryPath = finalizeMetadataVaryPath(
-        pattern.requestKey,
+      acc.metadataVaryPath = finalizeVaryPath(
+        getHeadRequestKey(pattern.requestKey),
         search,
         partialVaryPath
       )

@@ -1,4 +1,6 @@
 import type { RouteTree } from './segment-cache/cache'
+import type { VaryPath, VaryPathNode } from './segment-cache/vary-path'
+import { SEARCH_PARAMS_VARY_ID } from '../../shared/lib/segment-cache/vary-params-decoding'
 import React, {
   useEffect,
   useMemo,
@@ -27,7 +29,6 @@ import { useActionQueue } from './use-action-queue'
 import { setLastCommittedTree } from './router-reducer/reducers/committed-state'
 import { AppRouterAnnouncer } from './app-router-announcer'
 import { RedirectBoundary } from './redirect-boundary'
-import { findHeadInCache } from './router-reducer/reducers/find-head-in-cache'
 import { unresolvedThenable } from './unresolved-thenable'
 import { removeBasePath } from '../remove-base-path'
 import { hasBasePath } from '../has-base-path'
@@ -160,8 +161,8 @@ function HistoryUpdater({
     // task. Re-prefetch all visible links with the updated values. In most
     // cases, this will not result in any new network requests, only if
     // the prefetch result actually varies on one of these inputs.
-    pingVisibleLinks(appRouterState.nextUrl, appRouterState.cache)
-  }, [appRouterState.nextUrl, appRouterState.cache])
+    pingVisibleLinks(appRouterState.nextUrl, appRouterState.root)
+  }, [appRouterState.nextUrl, appRouterState.root])
 
   return null
 }
@@ -185,14 +186,13 @@ function copyNextJsInternalHistoryState(data: any) {
 function Head({
   headRenderTree,
 }: {
-  headRenderTree: RouteTree<CacheNode> | null
+  headRenderTree: RouteTree<CacheNode>
 }): React.ReactNode {
-  // If this segment has a `prefetchHead`, it's the statically prefetched data.
-  // We should use that on initial render instead of `head`. Then we'll switch
-  // to `head` when the dynamic response streams in.
-  const head = headRenderTree !== null ? headRenderTree.data.head : null
-  const prefetchHead =
-    headRenderTree !== null ? headRenderTree.data.prefetchHead : null
+  // If the head has a `prefetchRsc`, it's the statically prefetched data. We
+  // should use that on initial render instead of `rsc`. Then we'll switch to
+  // `rsc` when the dynamic response streams in.
+  const head = headRenderTree.data.rsc
+  const prefetchHead = headRenderTree.data.prefetchRsc
 
   // If no prefetch data is available, then we go straight to rendering `head`.
   const resolvedPrefetchRsc = prefetchHead !== null ? prefetchHead : head
@@ -201,6 +201,37 @@ function Head({
   // final values. The second argument is returned on initial render, then it
   // re-renders with the first argument.
   return useDeferredValue(head, resolvedPrefetchRsc)
+}
+
+function createHeadKey(varyPath: VaryPath): string {
+  // The head's vary path starts with its request key, which is the route
+  // position without param values, so the key must also include each path param
+  // value. Inside a transition, `useDeferredValue` returns the new (still
+  // pending) head rather than the prefetched one, so a Head that is not remounted
+  // on a param change suspends the whole navigation; only a remount renders
+  // `prefetchHead` first.
+  let key: string = varyPath.value
+  let params: VaryPathNode | null = varyPath.parent
+  while (params !== null) {
+    const value = params.value
+    if (typeof value === 'string') {
+      if (params.id === SEARCH_PARAMS_VARY_ID) {
+        // Omit search params during SSR so PPR keys match the prerender.
+        // TODO: To model this more accurately, we should use
+        // React.optimisticKey instead. Perhaps a separate Fragment that wraps
+        // around the Head: <Fragment key={headKey}> where headKey is
+        // React.optimisticKey during SSR. We should do this for all fallback
+        // param values.
+        if (typeof window !== 'undefined') {
+          key += value
+        }
+      } else {
+        key += '/' + value
+      }
+    }
+    params = params.parent
+  }
+  return key
 }
 
 /**
@@ -236,7 +267,7 @@ function Router({
   }, [canonicalUrl])
 
   if (process.env.NODE_ENV !== 'production') {
-    const { cache, tree } = state
+    const { root, tree } = state
 
     // This hook is in a conditional but that is ok because `process.env.NODE_ENV` never changes
     // eslint-disable-next-line react-hooks/rules-of-hooks
@@ -246,10 +277,10 @@ function Router({
       // @ts-ignore this is for debugging
       window.nd = {
         router: publicAppRouterInstance,
-        cache,
+        root,
         tree,
       }
-    }, [cache, tree])
+    }, [root, tree])
   }
 
   useEffect(() => {
@@ -437,11 +468,7 @@ function Router({
     }
   }, [])
 
-  const { cache, tree, nextUrl, scrollRef, previousNextUrl } = state
-
-  const matchingHead = useMemo(() => {
-    return findHeadInCache(cache, tree[1])
-  }, [cache, tree])
+  const { root, tree, nextUrl, scrollRef, previousNextUrl } = state
 
   // Add memoized pathParams for useParams.
   const pathParams = useMemo(() => {
@@ -467,7 +494,7 @@ function Router({
   const layoutRouterContext = useMemo(() => {
     return {
       parentTree: tree,
-      parentRenderTree: cache,
+      parentRenderTree: root.tree,
       parentSegmentPath: null,
       parentParams: {},
       parentLoadingData: null,
@@ -480,7 +507,7 @@ function Router({
       // Root segment is always active
       isActive: true,
     }
-  }, [tree, cache, canonicalUrl])
+  }, [tree, root, canonicalUrl])
 
   const globalLayoutRouterContext = useMemo(() => {
     return {
@@ -491,28 +518,17 @@ function Router({
     }
   }, [tree, scrollRef, nextUrl, previousNextUrl])
 
-  let head
-  if (matchingHead !== null) {
-    // The head is wrapped in an extra component so we can use
-    // `useDeferredValue` to swap between the prefetched and final versions of
-    // the head. (This is what LayoutRouter does for segment data, too.)
-    //
-    // The `key` is used to remount the component whenever the head moves to
-    // a different segment.
-    const [headRenderTree, headKey, headKeyWithoutSearchParams] = matchingHead
-
-    head = (
-      <Head
-        key={
-          // Necessary for PPR: omit search params from the key to match prerendered keys
-          typeof window === 'undefined' ? headKeyWithoutSearchParams : headKey
-        }
-        headRenderTree={headRenderTree}
-      />
-    )
-  } else {
-    head = null
-  }
+  // The head is wrapped in an extra component so we can use
+  // `useDeferredValue` to swap between the prefetched and final versions of
+  // the head. (This is what LayoutRouter does for segment data, too.)
+  //
+  // The `key` is used to remount the component whenever the head moves to a
+  // different page, one of its path param values changes (the same inputs as
+  // LayoutRouter's keys), or its search params change. These are the entries
+  // of the head's vary path (see getHeadRequestKey).
+  const head = (
+    <Head key={createHeadKey(root.head.varyPath)} headRenderTree={root.head} />
+  )
 
   let content = (
     <RedirectBoundary>
@@ -520,7 +536,7 @@ function Router({
       {/* RootLayoutBoundary enables detection of Suspense boundaries around the root layout.
           When users wrap their layout in <Suspense>, this creates the component stack pattern
           "Suspense -> RootLayoutBoundary" which dynamic-rendering.ts uses to allow dynamic rendering. */}
-      <RootLayoutBoundary>{cache.data.rsc}</RootLayoutBoundary>
+      <RootLayoutBoundary>{root.tree.data.rsc}</RootLayoutBoundary>
       <AppRouterAnnouncer tree={tree} />
     </RedirectBoundary>
   )
