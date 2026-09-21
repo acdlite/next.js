@@ -1335,11 +1335,16 @@ export function attemptToFulfillDynamicSegmentFromBFCache(
   const varyPath = tree.varyPath
 
   // Read from the BFCache without expiring it (pass -1). We check freshness
-  // ourselves using navigatedAt, because the BFCache's staleAt may have been
-  // overridden by a per-page unstable_dynamicStaleTime and can't be used to
-  // derive the original request time.
+  // ourselves using navigatedAt, because the BFCache's stale time may have
+  // been overridden by a per-page unstable_dynamicStaleTime and can't be used
+  // to derive the original request time.
   const bfcacheEntry = readFromBFCache(varyPath)
   if (bfcacheEntry !== null) {
+    const rsc = bfcacheEntry.rsc
+    if (rsc.status !== 'fulfilled') {
+      // Data that hasn't arrived yet is no more use than a miss.
+      return null
+    }
     // The stale time for dynamic prefetches (default: 5 mins) is different
     // from the stale time for regular navigations (default: 0 secs). Use
     // navigatedAt to compute the correct expiry for prefetch purposes.
@@ -1353,10 +1358,10 @@ export function attemptToFulfillDynamicSegmentFromBFCache(
     const isPartial = false
     return fulfillSegmentCacheEntry(
       pendingSegment,
-      bfcacheEntry.rsc,
+      rsc.value,
       dynamicPrefetchStaleAt,
       isPartial,
-      bfcacheEntry.varyParams,
+      rsc.varyParams,
       // bfcache data is concrete, never an ISR fallback.
       false,
       FetchStrategy.Full
@@ -1380,6 +1385,11 @@ export function attemptToUpgradeSegmentFromBFCache(
   const varyPath = tree.varyPath
   const bfcacheEntry = readFromBFCache(varyPath)
   if (bfcacheEntry !== null) {
+    const rsc = bfcacheEntry.rsc
+    if (rsc.status !== 'fulfilled') {
+      // Data that hasn't arrived yet is no more use than a miss.
+      return null
+    }
     const dynamicPrefetchStaleAt =
       bfcacheEntry.navigatedAt + STATIC_STALETIME_MS
     if (now > dynamicPrefetchStaleAt) {
@@ -1392,10 +1402,10 @@ export function attemptToUpgradeSegmentFromBFCache(
     const isPartial = false
     const newEntry = fulfillSegmentCacheEntry(
       pendingSegment,
-      bfcacheEntry.rsc,
+      rsc.value,
       dynamicPrefetchStaleAt,
       isPartial,
-      bfcacheEntry.varyParams,
+      rsc.varyParams,
       // bfcache data is concrete, never an ISR fallback.
       false,
       FetchStrategy.Full

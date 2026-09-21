@@ -1,6 +1,6 @@
 import { DYNAMIC_STALETIME_MS } from '../router-reducer/reducers/navigate-reducer'
 import type { CacheNode } from '../../../shared/lib/app-router-types'
-import type { VaryParams } from '../../../shared/lib/segment-cache/vary-params-decoding'
+import type { ComponentData } from '../render-tree'
 import type { VaryPath } from './vary-path'
 
 /**
@@ -31,14 +31,28 @@ import {
   createCacheMap,
 } from './cache-map'
 
+/**
+ * Holds the data a navigation rendered for a segment, keyed by the segment's
+ * vary path, so a later navigation can render it again. The entry shares the
+ * CacheNode's `rsc` object; when a pending one is fulfilled, the entry sees
+ * the data, its vary params, and its stale time with nothing to patch.
+ *
+ * TODO: Consider merging this wrapper into the ComponentData it holds, so the
+ * BFCache stores the shared data directly. Three things stood in the way:
+ * MapValue.status is the numeric EntryStatus while React reads `status` as
+ * a string; the CacheMap keeps a value under one key and moves it when it is
+ * written again, but the same data is written under a new vary path when a
+ * navigation reuses it for unread params; and bfcacheId follows the React
+ * `key`, not the data, so it would need its own cache.
+ *
+ * TODO: Write entries at the most generic vary path their varyParams allow,
+ * as writeSegmentDataIntoCache does with getFulfilledSegmentVaryPath, so a
+ * history traversal to a URL that differs only in unread params hits the
+ * entry. Today entries are keyed at the concrete path.
+ */
 export type BFCacheEntry = {
-  rsc: React.ReactNode | null
-  prefetchRsc: React.ReactNode | null
-
-  // The source of the params `rsc` depends on, copied from the CacheNode that
-  // wrote this entry (see CacheNode.varyParams). A restored node reads it to
-  // decide whether a later navigation can keep its data.
-  varyParams: VaryParams | null
+  rsc: ComponentData
+  prefetchRsc: ComponentData | null
 
   // The bfcacheId of the CacheNode that wrote this entry. Restored on
   // history-traversal navigations so that `useRouter().bfcacheId` is stable
@@ -49,10 +63,12 @@ export type BFCacheEntry = {
   size: number
   // The time at which this data was received. Used to compute the stale time
   // for dynamic prefetches (which use STATIC_STALETIME_MS instead of
-  // DYNAMIC_STALETIME_MS). Stored explicitly because staleAt may be
+  // DYNAMIC_STALETIME_MS). Stored explicitly because rsc.staleAt may be
   // overridden by a per-page unstable_dynamicStaleTime, which would break
-  // any reverse calculation from staleAt.
+  // any reverse calculation from it.
   navigatedAt: number
+  // Freshness is judged from `rsc.staleAt`, which the response fills in; this
+  // field only satisfies the MapValue protocol and never expires the entry.
   staleAt: number
   version: number
   // A BFCacheEntry always represents a completed navigation, so the status is
@@ -75,8 +91,7 @@ export function invalidateBfCache(): void {
 export function writeToBFCache(
   now: number,
   varyPath: VaryPath,
-  cacheNode: CacheNode,
-  dynamicStaleAt: number
+  cacheNode: CacheNode
 ): void {
   if (typeof window === 'undefined') {
     return
@@ -85,8 +100,6 @@ export function writeToBFCache(
   const entry: BFCacheEntry = {
     rsc: cacheNode.rsc,
     prefetchRsc: cacheNode.prefetchRsc,
-
-    varyParams: cacheNode.varyParams,
 
     bfcacheId: cacheNode.bfcacheId,
 
@@ -100,57 +113,12 @@ export function writeToBFCache(
 
     navigatedAt: now,
 
-    // A back/forward navigation will disregard the stale time. This field is
-    // only relevant when staleTimes.dynamic is enabled or unstable_dynamicStaleTime
-    // is exported by a page.
-    staleAt: dynamicStaleAt,
+    staleAt: Infinity,
     version: currentBfCacheVersion,
     status: EntryStatus.Fulfilled,
   }
   const isRevalidation = false
   setInCacheMap(bfcacheMap, varyPath, entry, isRevalidation)
-}
-
-/**
- * Patches the entry written for a segment before its dynamic response
- * arrived, with what the response filled in on the segment's CacheNode: the
- * per-page stale time from `unstable_dynamicStaleTime` (authoritative over
- * the default DYNAMIC_STALETIME_MS the entry was written with) and the
- * source of the params its data depends on. The entry shares the node's
- * deferred `rsc` promise, which the response resolves in place. Only the entry
- * that shares the node's `rsc` is updated; a refresh may have replaced the
- * entry at the same vary path, and that entry belongs to the newer node.
- *
- * TODO: This function exists because the entry gets `rsc` when it is written
- * but the stale time and vary params only later, through a second write that
- * has to find the entry again. The response should fill in all three as one
- * unit: make the pending CacheNode itself the thenable (like DeferredRsc, but
- * for the whole node) with an explicit pending → fulfilled/rejected
- * transition, so the entry holds the node and observes its resolution
- * directly, with nothing to look up or patch afterwards.
- */
-export function updateBFCacheEntryFromDynamicResponse(
-  varyPath: VaryPath,
-  cacheNode: CacheNode,
-  newStaleAt: number
-): void {
-  if (typeof window === 'undefined') {
-    return
-  }
-  const isRevalidation = false
-  // Read with staleness bypass (-1) so we can update even stale entries
-  const entry = getFromCacheMap(
-    -1,
-    currentBfCacheVersion,
-    bfcacheMap,
-    varyPath,
-    isRevalidation,
-    false
-  )
-  if (entry !== null && entry.rsc === cacheNode.rsc) {
-    entry.staleAt = newStaleAt
-    entry.varyParams = cacheNode.varyParams
-  }
 }
 
 export function readFromBFCache(varyPath: VaryPath): BFCacheEntry | null {
@@ -179,12 +147,21 @@ export function readFromBFCacheDuringRegularNavigation(
     return null
   }
   const isRevalidation = false
-  return getFromCacheMap(
-    now,
+  const entry = getFromCacheMap(
+    -1,
     currentBfCacheVersion,
     bfcacheMap,
     varyPath,
     isRevalidation,
     false
   )
+  if (entry === null) {
+    return null
+  }
+  // The stale time is only relevant when staleTimes.dynamic is enabled or
+  // unstable_dynamicStaleTime is exported by a page.
+  if (entry.rsc.staleAt <= now) {
+    return null
+  }
+  return entry
 }

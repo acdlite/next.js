@@ -18,7 +18,6 @@ import React, {
   useContext,
   use,
   Suspense,
-  useDeferredValue,
   useLayoutEffect,
   type FragmentInstance,
   type JSX,
@@ -30,6 +29,7 @@ import {
   TemplateContext,
 } from '../../shared/lib/app-router-context.shared-runtime'
 import { unresolvedThenable } from './unresolved-thenable'
+import { useRenderTree } from './render-tree'
 import { ErrorBoundary } from './error-boundary'
 import { disableSmoothScrollDuringRouteTransition } from '../../shared/lib/router/utils/disable-smooth-scroll'
 import { RedirectBoundary } from './redirect-boundary'
@@ -50,7 +50,6 @@ import {
 } from '../../shared/lib/hooks-client-context.shared-runtime'
 import { getParamValueFromCacheKey } from '../route-params'
 import type { Params } from '../../server/request/params'
-import { isDeferredRsc } from './render-tree'
 
 const enum ScrollTargetState {
   NoClientRects,
@@ -323,45 +322,7 @@ function InnerLayoutRouter({
     throw new Error('invariant global layout router not mounted')
   }
 
-  // `rsc` represents the renderable node for this segment.
-
-  // If this segment has a `prefetchRsc`, it's the statically prefetched data.
-  // We should use that on initial render instead of `rsc`. Then we'll switch
-  // to `rsc` when the dynamic response streams in.
-  //
-  // If no prefetch data is available, then we go straight to rendering `rsc`.
-  const resolvedPrefetchRsc =
-    renderTree.data.prefetchRsc !== null
-      ? renderTree.data.prefetchRsc
-      : renderTree.data.rsc
-
-  // We use `useDeferredValue` to handle switching between the prefetched and
-  // final values. The second argument is returned on initial render, then it
-  // re-renders with the first argument.
-  const rsc: any = useDeferredValue(renderTree.data.rsc, resolvedPrefetchRsc)
-
-  // `rsc` is either a React node or a promise for a React node, except we
-  // special case `null` to represent that this segment's data is missing. If
-  // it's a promise, we need to unwrap it so we can determine whether or not the
-  // data is missing.
-  let resolvedRsc: React.ReactNode
-  if (isDeferredRsc(rsc)) {
-    const unwrappedRsc = use(rsc)
-    if (unwrappedRsc === null) {
-      // If the promise was resolved to `null`, it means the data for this
-      // segment was not returned by the server. Suspend indefinitely. When this
-      // happens, the router is responsible for triggering a new state update to
-      // un-suspend this segment.
-      use(unresolvedThenable) as never
-    }
-    resolvedRsc = unwrappedRsc
-  } else {
-    // This is not a deferred RSC promise. Don't need to unwrap it.
-    if (rsc === null) {
-      use(unresolvedThenable) as never
-    }
-    resolvedRsc = rsc
-  }
+  const resolvedRsc = useRenderTree(renderTree)
 
   // In dev, we create a NavigationPromisesContext containing the instrumented promises that provide
   // `useSelectedLayoutSegment` and `useSelectedLayoutSegments`.

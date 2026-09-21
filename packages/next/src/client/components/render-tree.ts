@@ -1,3 +1,5 @@
+import { use, useDeferredValue } from 'react'
+import { unresolvedThenable } from './unresolved-thenable'
 import type { FlightRouterState } from '../../shared/lib/app-router-types'
 import type { CacheNode } from '../../shared/lib/app-router-types'
 import type { ScrollRef } from '../../shared/lib/app-router-types'
@@ -52,7 +54,6 @@ import {
   readFromBFCache,
   readFromBFCacheDuringRegularNavigation,
   writeToBFCache,
-  updateBFCacheEntryFromDynamicResponse,
   computeDynamicStaleAt,
 } from './segment-cache/bfcache'
 import type { VaryParams } from '../../shared/lib/segment-cache/vary-params-decoding'
@@ -434,26 +435,21 @@ function updateRenderTreeOnNavigation(
         // can keep using it. Refreshes always fetch new data, and back/forward
         // navigations restore the entry from the BFCache instead.
         const oldCacheNode = oldRenderTree.data
+        const oldRsc = oldCacheNode.rsc
         if (
           !didReadChangedParam(
             oldRenderTree.varyPath,
             newRouteTree.varyPath,
-            oldCacheNode.varyParams
+            oldRsc.varyParams
           )
         ) {
           const cacheNode = createCacheNode(
-            oldCacheNode.rsc,
+            oldRsc,
             oldCacheNode.prefetchRsc,
-            oldCacheNode.varyParams,
             bfcacheId
           )
           if (freshness !== FreshnessPolicy.Gesture) {
-            writeToBFCache(
-              navigatedAt,
-              newRouteTree.varyPath,
-              cacheNode,
-              seedDynamicStaleAt
-            )
+            writeToBFCache(navigatedAt, newRouteTree.varyPath, cacheNode)
           }
           newRenderTree = createRenderTree(newRouteTree, cacheNode)
           needsDynamicRequest = false
@@ -1041,7 +1037,6 @@ function createRenderTreeForSegment(
             createCacheNode(
               bfcacheEntry.rsc,
               bfcacheEntry.prefetchRsc,
-              bfcacheEntry.varyParams,
               bfcacheId
             )
           ),
@@ -1068,12 +1063,11 @@ function createRenderTreeForSegment(
       // modeling it in a more consistent way. See also the /_notFound special
       // case in updateRenderTreeOnNavigation.
       const cacheNode = createCacheNode(
-        seedRsc,
+        createFulfilledComponentData(seedRsc, seedVaryParams, dynamicStaleAt),
         null,
-        seedVaryParams,
         bfcacheId
       )
-      writeToBFCache(now, tree.varyPath, cacheNode, dynamicStaleAt)
+      writeToBFCache(now, tree.varyPath, cacheNode)
       return {
         node: createRenderTree(tree, cacheNode),
         needsDynamicRequest: false,
@@ -1093,21 +1087,19 @@ function createRenderTreeForSegment(
         // heuristic, we assume that the rest dynamic data will stream in
         // quickly, so it's still better to skip the prefetch state.
         const oldRsc = bfcacheEntry.rsc
-        const oldRscDidResolve =
-          !isDeferredRsc(oldRsc) || oldRsc.status !== 'pending'
-        const dropPrefetchRsc = oldRscDidResolve
+        let prefetchRsc: ComponentData | null
+        if (oldRsc.status === 'pending') {
+          prefetchRsc = bfcacheEntry.prefetchRsc
+        } else {
+          prefetchRsc = null
+        }
         // Restore the bfcacheId from the cached entry so that back/forward
         // navigations preserve the original id, regardless of whether
         // `cacheComponents` Activity preservation is enabled.
         return {
           node: createRenderTree(
             tree,
-            createCacheNode(
-              bfcacheEntry.rsc,
-              dropPrefetchRsc ? null : bfcacheEntry.prefetchRsc,
-              bfcacheEntry.varyParams,
-              bfcacheEntry.bfcacheId
-            )
+            createCacheNode(oldRsc, prefetchRsc, bfcacheEntry.bfcacheId)
           ),
           needsDynamicRequest: false,
         }
@@ -1126,6 +1118,9 @@ function createRenderTreeForSegment(
   let cachedRsc: React.ReactNode | null = null
   let isCachedRscPartial: boolean = true
   let cachedVaryParams: VaryParams | null = null
+  // The stale time of the cached data itself; the node's `rsc` uses the
+  // navigation's dynamic stale time regardless.
+  let cachedStaleAt: number = dynamicStaleAt
 
   const segmentEntry = readSegmentCacheEntryForNavigation(
     now,
@@ -1140,6 +1135,7 @@ function createRenderTreeForSegment(
         cachedRsc = segmentEntry.rsc
         isCachedRscPartial = segmentEntry.isPartial
         cachedVaryParams = segmentEntry.varyParams
+        cachedStaleAt = segmentEntry.staleAt
         break
       }
       case EntryStatus.Pending: {
@@ -1150,8 +1146,9 @@ function createRenderTreeForSegment(
         cachedRsc = promiseForFulfilledEntry.then((entry) =>
           entry !== null ? entry.rsc : null
         )
-        // The entry's data hasn't arrived, and neither has the source of the
-        // params it depends on; `cachedVaryParams` stays null.
+        // The entry's data hasn't arrived, and neither have the source of the
+        // params it depends on or its stale time; `cachedVaryParams` and
+        // `cachedStaleAt` keep their defaults.
         // Because the request is still pending, we typically don't know yet
         // whether the response will be partial. We shouldn't skip this segment
         // during the dynamic navigation request. Otherwise, we might need to
@@ -1205,16 +1202,12 @@ function createRenderTreeForSegment(
   // A partial state to show immediately while we wait for the final data to
   // arrive. If `rsc` is already a complete value (not partial), or if we
   // don't have any useful partial state, this will be `null`.
-  let prefetchRsc: React.ReactNode | null
-  // The final, resolved segment data. If the data is missing, this will be a
-  // promise that resolves to the eventual data. A resolved value of `null`
-  // means the data failed to load; the LayoutRouter will suspend indefinitely
-  // until the router updates again (refer to finishNavigationTask).
-  let rsc: React.ReactNode | null
-  // The source of the params `rsc` depends on. A server response or a
-  // fulfilled segment cache entry carries one; a deferred `rsc` gets its
-  // source when the response arrives (finishPendingCacheNode).
-  let varyParams: VaryParams | null
+  let prefetchRsc: ComponentData | null
+  // The final segment data. If the data is missing, this is pending until the
+  // response arrives. A fulfilled value of `null` means the data failed to
+  // load; the LayoutRouter will suspend indefinitely until the router updates
+  // again (refer to finishNavigationTask).
+  let rsc: ComponentData
   let doesSegmentNeedDynamicRequest: boolean
 
   if (seedRsc !== null) {
@@ -1222,17 +1215,31 @@ function createRenderTreeForSegment(
     if (isCachedRscPartial) {
       // The seed data may still be streaming in, so it's worth showing the
       // partial cached state in the meantime.
-      prefetchRsc = cachedRsc
-      rsc = seedRsc
-      varyParams = seedVaryParams
+      if (cachedRsc !== null) {
+        prefetchRsc = createFulfilledComponentData(
+          cachedRsc,
+          cachedVaryParams,
+          cachedStaleAt
+        )
+      } else {
+        prefetchRsc = null
+      }
+      rsc = createFulfilledComponentData(
+        seedRsc,
+        seedVaryParams,
+        dynamicStaleAt
+      )
     } else {
       // We already have a completely cached segment. Ignore the seed data,
       // which may still be streaming in. This shouldn't happen in the normal
       // case because the client will inform the server which segments are
       // already fully cached, and the server will skip rendering them.
       prefetchRsc = null
-      rsc = cachedRsc
-      varyParams = cachedVaryParams
+      rsc = createFulfilledComponentData(
+        cachedRsc,
+        cachedVaryParams,
+        dynamicStaleAt
+      )
     }
     doesSegmentNeedDynamicRequest = false
   } else {
@@ -1240,17 +1247,24 @@ function createRenderTreeForSegment(
       // The cached data contains dynamic holes, or it's missing entirely. We'll
       // show the partial state immediately (if available), and stream in the
       // final data.
-      //
-      // Create a pending promise that we can later write to when the
-      // data arrives from the server.
-      prefetchRsc = cachedRsc
-      rsc = createDeferredRsc()
-      varyParams = null
+      if (cachedRsc !== null) {
+        prefetchRsc = createFulfilledComponentData(
+          cachedRsc,
+          cachedVaryParams,
+          cachedStaleAt
+        )
+      } else {
+        prefetchRsc = null
+      }
+      rsc = createPendingComponentData(dynamicStaleAt)
     } else {
       // The data is fully cached.
       prefetchRsc = null
-      rsc = cachedRsc
-      varyParams = cachedVaryParams
+      rsc = createFulfilledComponentData(
+        cachedRsc,
+        cachedVaryParams,
+        dynamicStaleAt
+      )
     }
     doesSegmentNeedDynamicRequest = isCachedRscPartial
   }
@@ -1261,31 +1275,30 @@ function createRenderTreeForSegment(
   //
   // Skip BFCache writes for optimistic navigations since they are transient
   // and will be replaced by the canonical navigation.
-  const cacheNode = createCacheNode(rsc, prefetchRsc, varyParams, bfcacheId)
+  const cacheNode = createCacheNode(rsc, prefetchRsc, bfcacheId)
   if (freshness !== FreshnessPolicy.Gesture) {
-    writeToBFCache(now, tree.varyPath, cacheNode, dynamicStaleAt)
+    writeToBFCache(now, tree.varyPath, cacheNode)
   }
 
   return {
     node: createRenderTree(tree, cacheNode),
-    // TODO: We should store this field on the CacheNode itself. I think we can
-    // probably unify NavigationTask, CacheNode, and DeferredRsc into a
-    // single type. Or at least CacheNode and DeferredRsc.
+    // Not the same as `rsc.status === 'pending'`: a node can share a
+    // still-pending `rsc` (from the BFCache above, or from the node it
+    // replaces in updateRenderTreeOnNavigation) without requesting it again;
+    // the navigation that created it is fetching it.
     needsDynamicRequest: doesSegmentNeedDynamicRequest,
   }
 }
 
 function createCacheNode(
-  rsc: React.ReactNode | null,
-  prefetchRsc: React.ReactNode | null,
-  varyParams: VaryParams | null,
+  rsc: ComponentData,
+  prefetchRsc: ComponentData | null,
   bfcacheId: number,
   scrollRef: ScrollRef | null = null
 ): CacheNode {
   return {
     rsc,
     prefetchRsc,
-    varyParams,
     scrollRef,
     bfcacheId,
   }
@@ -1480,16 +1493,12 @@ async function finishNavigationTask(
   // first phase; it doesn't matter in that case because we're going to refresh
   // the whole tree regardless.
   if (exitStatus === NavigationTaskExitStatus.Done) {
-    exitStatus = abortRemainingPendingTasks(navigation.tree, null, null)
+    exitStatus = abortRemainingPendingTasks(navigation.tree)
     // A response without a head is a mismatch, like any missing segment. The
-    // head's deferred rsc must be resolved to `null` here, never rejected: it
-    // renders at the app root, so a rejection would hit the root error
-    // boundary while the retry is in flight.
-    const headExitStatus = abortRemainingPendingTasks(
-      navigation.head,
-      null,
-      null
-    )
+    // head's rsc is fulfilled with `null` here, never rejected: it renders at
+    // the app root, so a rejection would hit the root error boundary while
+    // the retry is in flight.
+    const headExitStatus = abortRemainingPendingTasks(navigation.head)
     if (headExitStatus > exitStatus) {
       exitStatus = headExitStatus
     }
@@ -1906,20 +1915,38 @@ function writeDynamicDataIntoNavigationTask(
   const dynamicData = serverRouteTree.data
   if (task.status === NavigationTaskStatus.Pending && dynamicData !== null) {
     task.status = NavigationTaskStatus.Fulfilled
-    const cacheNode = task.node.data
-    finishPendingCacheNode(cacheNode, dynamicData, debugInfo, revealAfter)
-
-    // The BFCache entry for this segment was written before the response
-    // arrived. Bring it up to date with what the response filled in: its
-    // staleAt (the per-page unstable_dynamicStaleTime if set, or the default
-    // DYNAMIC_STALETIME_MS) and the source of the params its data depends
-    // on. We only update segments that received dynamic data — static
-    // segments are unaffected.
-    updateBFCacheEntryFromDynamicResponse(
-      serverRouteTree.varyPath,
-      cacheNode,
-      dynamicStaleAt
-    )
+    const rsc = task.node.data.rsc
+    const dynamicSegmentData = dynamicData.rsc
+    if (dynamicSegmentData === null) {
+      // This particular server request did not render this segment. There may
+      // be a separate pending request that will, though, so we won't abort the
+      // task until all pending requests finish.
+    } else if (revealAfter !== null) {
+      // In the streaming dev render, defer the fill until `revealAfter`
+      // settles, so React doesn't render the boundary's children before their
+      // row has been decoded (otherwise it suspends on the still-pending
+      // children and commits a premature fallback).
+      const fulfill = () =>
+        fulfillComponentData(
+          rsc,
+          dynamicSegmentData,
+          dynamicData.varyParams,
+          dynamicStaleAt,
+          debugInfo
+        )
+      // Use the same callback for both outcomes: we don't expect `revealAfter`
+      // to reject, but if it ever did (e.g. a connection drop mid-stream) we'd
+      // still want to fulfill the rsc.
+      revealAfter.then(fulfill, fulfill)
+    } else {
+      fulfillComponentData(
+        rsc,
+        dynamicSegmentData,
+        dynamicData.varyParams,
+        dynamicStaleAt,
+        debugInfo
+      )
+    }
   }
 
   const taskChildren = task.children
@@ -1985,81 +2012,14 @@ function writeDynamicDataIntoNavigationTask(
   return didReceiveUnknownParallelRoute
 }
 
-function finishPendingCacheNode(
-  cacheNode: CacheNode,
-  dynamicData: RSCSegmentData,
-  debugInfo: Array<any> | null,
-  revealAfter: Promise<void> | null
-): void {
-  // Writes a dynamic response into an existing render tree. This does _not_
-  // create a new tree, it updates the existing tree in-place. So it must follow
-  // the Suspense rules of cache safety — it can resolve pending promises, but
-  // it cannot overwrite existing data. It can add segments to the tree (because
-  // a missing segment will cause the layout router to suspend) but it cannot
-  // delete them.
-  //
-  // We must resolve every promise in the tree, or else it will suspend
-  // indefinitely. If we did not receive data for a segment, we will resolve its
-  // data promise to `null` to trigger a lazy fetch during render.
-
-  // Use the dynamic data from the server to fulfill the deferred RSC promise.
-  const rsc = cacheNode.rsc
-  const dynamicSegmentData = dynamicData.rsc
-
-  if (dynamicSegmentData === null) {
-    // This particular server request did not
-    // render this segment. There may be a separate pending request that will,
-    // though, so we won't abort the task until all pending requests finish.
-    return
-  }
-
-  // TODO: `varyParams` must always describe the render that produced `rsc`,
-  // but nothing in the CacheNode type ties the two fields together; this
-  // function keeps them in lockstep by writing both at once. Eventually the
-  // whole CacheNode should be a thenable whose fields are populated through
-  // dedicated helpers that own the state transition.
-  if (rsc === null) {
-    // This is a lazy cache node. We can overwrite it. This is only safe
-    // because we know that the LayoutRouter suspends if `rsc` is `null`.
-    cacheNode.rsc = dynamicSegmentData
-    cacheNode.varyParams = dynamicData.varyParams
-  } else if (isDeferredRsc(rsc) && rsc.status === 'pending') {
-    // This is a deferred RSC promise. We can fulfill it with the data we just
-    // received from the server. The source of the params that data depends
-    // on travels with it.
-    //
-    // In the streaming dev render, defer the fill until `revealAfter` settles,
-    // so React doesn't render the boundary's children before their row has been
-    // decoded (otherwise it suspends on the still-pending children and commits
-    // a premature fallback). Outside that render `revealAfter` is null and we
-    // resolve immediately.
-    cacheNode.varyParams = dynamicData.varyParams
-    if (revealAfter !== null) {
-      const resolveRsc = () => rsc.resolve(dynamicSegmentData, debugInfo)
-      // Use the same callback for both outcomes: we don't expect `revealAfter`
-      // to reject, but if it ever did (e.g. a connection drop mid-stream) we'd
-      // still want to resolve the RSC.
-      revealAfter.then(resolveRsc, resolveRsc)
-    } else {
-      rsc.resolve(dynamicSegmentData, debugInfo)
-    }
-  } else {
-    // This is not a deferred RSC promise that's still pending, nor is it
-    // empty, so it must have been populated by a different navigation. We
-    // must not overwrite it (nor its dependency source).
-  }
-}
-
 function abortRemainingPendingTasks(
-  task: NavigationTask,
-  error: any,
-  debugInfo: Array<any> | null
+  task: NavigationTask
 ): NavigationTaskExitStatus {
   let exitStatus
   if (task.status === NavigationTaskStatus.Pending) {
     // The data for this segment is still missing.
     task.status = NavigationTaskStatus.Rejected
-    abortPendingCacheNode(task.node.data, error, debugInfo)
+    abortPendingComponentData(task.node.data.rsc)
 
     // If the server failed to fulfill the data for this segment, it implies
     // that the route tree received from the server mismatched the tree that
@@ -2095,11 +2055,7 @@ function abortRemainingPendingTasks(
   const taskChildren = task.children
   if (taskChildren !== null) {
     for (const [, taskChild] of taskChildren) {
-      const childExitStatus = abortRemainingPendingTasks(
-        taskChild,
-        error,
-        debugInfo
-      )
+      const childExitStatus = abortRemainingPendingTasks(taskChild)
       // Propagate the exit status up the tree. The statuses are ordered by
       // their precedence.
       if (childExitStatus > exitStatus) {
@@ -2111,117 +2067,181 @@ function abortRemainingPendingTasks(
   return exitStatus
 }
 
-function abortPendingCacheNode(
-  cacheNode: CacheNode,
-  error: any,
-  debugInfo: Array<any> | null
-): void {
-  const rsc = cacheNode.rsc
-  if (isDeferredRsc(rsc)) {
-    if (error === null) {
-      // This will trigger a lazy fetch during render.
-      rsc.resolve(null, debugInfo)
-    } else {
-      // This will trigger an error during rendering.
-      rsc.reject(error, debugInfo)
-    }
-  }
-}
+/**
+ * The rendered component output the server sends for a segment (or the head),
+ * as opposed to the route structure it sends alongside: the RSC data, the
+ * source of the params it depends on, and how long it stays fresh. One object
+ * is shared by reference by every CacheNode that renders the same data and by
+ * the BFCache entry written for it, so a pending navigation's response
+ * fulfills all of them at once.
+ *
+ * Implements React's thenable protocol so a component can `use()` it:
+ * `status`/`value` are read synchronously once fulfilled, and `then` is only
+ * called while pending. Never rejected — a response that omits a segment
+ * fulfills it with `null`, which renders as a suspension until the router
+ * updates again.
+ */
+export type ComponentData = PendingComponentData | FulfilledComponentData
 
-const DEFERRED = Symbol()
-
-type PendingDeferredRsc<T> = Promise<T> & {
+export type PendingComponentData = {
   status: 'pending'
-  resolve: (value: T, debugInfo: Array<any> | null) => void
-  reject: (error: any, debugInfo: Array<any> | null) => void
-  tag: Symbol
+  value: null
+  varyParams: null
+  /**
+   * When the data stops being fresh for a regular navigation. Provisional
+   * while pending (the default dynamic stale time); the response's own
+   * stale time replaces it on fulfill.
+   */
+  staleAt: number
+  /** Profiling info for React DevTools; the response's is appended on fulfill. */
   _debugInfo: Array<any>
+  /**
+   * Callbacks waiting for the data, called on fulfill. Null until the first
+   * `then` while pending; nodes are constructed during SSR, where nothing
+   * calls `then`, so nothing is allocated there.
+   */
+  listeners: Array<(value: React.ReactNode) => void> | null
+  /**
+   * React's published types accept only a PromiseLike `then`, so it is typed
+   * as one; the implementation records `onFulfill` in `listeners` and returns
+   * nothing. React reads `status` and `value` first and calls `then` only
+   * while pending, ignoring its result.
+   */
+  then: PromiseLike<React.ReactNode>['then']
 }
 
-type FulfilledDeferredRsc<T> = Promise<T> & {
+export type FulfilledComponentData = {
   status: 'fulfilled'
-  value: T
-  resolve: (value: T, debugInfo: Array<any> | null) => void
-  reject: (error: any, debugInfo: Array<any> | null) => void
-  tag: Symbol
+  /**
+   * The segment's RSC data. Null when the response did not include the
+   * segment: because segment data is always a <LayoutRouter> component,
+   * `null` can stand for missing data, and rendering suspends.
+   */
+  value: React.ReactNode
+  /**
+   * The source of the params `value` depends on, from the response that
+   * produced it. Null when unknown: the data came from a render that didn't
+   * track params. A navigation that only changes params this output did not
+   * depend on can keep rendering it.
+   */
+  varyParams: VaryParams | null
+  staleAt: number
   _debugInfo: Array<any>
+  listeners: null
+  then: PromiseLike<React.ReactNode>['then']
 }
 
-type RejectedDeferredRsc<T> = Promise<T> & {
-  status: 'rejected'
-  reason: any
-  resolve: (value: T, debugInfo: Array<any> | null) => void
-  reject: (error: any, debugInfo: Array<any> | null) => void
-  tag: Symbol
-  _debugInfo: Array<any>
+function createPendingComponentData(provisionalStaleAt: number): ComponentData {
+  return {
+    status: 'pending',
+    value: null,
+    varyParams: null,
+    staleAt: provisionalStaleAt,
+    _debugInfo: [],
+    listeners: null,
+    then: thenComponentData,
+  }
 }
 
-type DeferredRsc<T extends React.ReactNode = React.ReactNode> =
-  | PendingDeferredRsc<T>
-  | FulfilledDeferredRsc<T>
-  | RejectedDeferredRsc<T>
-
-// This type exists to distinguish a DeferredRsc from a Flight promise. It's a
-// compromise to avoid adding an extra field on every Cache Node, which would be
-// awkward because the pre-PPR parts of codebase would need to account for it,
-// too. We can remove it once type Cache Node type is more settled.
-export function isDeferredRsc(value: any): value is DeferredRsc {
-  return value && typeof value === 'object' && value.tag === DEFERRED
+function createFulfilledComponentData(
+  value: React.ReactNode,
+  varyParams: VaryParams | null,
+  staleAt: number
+): ComponentData {
+  return {
+    status: 'fulfilled',
+    value,
+    varyParams,
+    staleAt,
+    _debugInfo: [],
+    listeners: null,
+    then: thenComponentData,
+  }
 }
 
-function createDeferredRsc<
-  T extends React.ReactNode = React.ReactNode,
->(): PendingDeferredRsc<T> {
-  // Create an unresolved promise that represents data derived from a Flight
-  // response. The promise will be resolved later as soon as we start receiving
-  // data from the server, i.e. as soon as the Flight client decodes and returns
-  // the top-level response object.
+// The `then` of every ComponentData. React only calls it while pending; the
+// fulfilled branch is for any other caller. Typed as PromiseLike's `then` to
+// satisfy React's `use` (see ComponentData); the result is never used.
+const thenComponentData =
+  thenComponentDataImpl as unknown as ComponentData['then']
+function thenComponentDataImpl(
+  this: ComponentData,
+  onFulfill: (value: React.ReactNode) => unknown,
+  // Nothing rejects a ComponentData, so `onReject` is never called.
+  _onReject?: (reason: unknown) => unknown
+): void {
+  if (this.status === 'pending') {
+    const listeners = this.listeners
+    if (listeners === null) {
+      this.listeners = [onFulfill]
+    } else {
+      listeners.push(onFulfill)
+    }
+  } else {
+    onFulfill(this.value)
+  }
+}
 
-  // The `_debugInfo` field contains profiling information. Promises that are
-  // created by Flight already have this info added by React; for any derived
-  // promise created by the router, we need to transfer the Flight debug info
-  // onto the derived promise.
-  //
-  // The debug info represents the latency between the start of the navigation
-  // and the start of rendering. (It does not represent the time it takes for
-  // whole stream to finish.)
-  const debugInfo: Array<any> = []
-
-  let resolve: any
-  let reject: any
-  const pendingRsc = new Promise<T>((res, rej) => {
-    resolve = res
-    reject = rej
-  }) as PendingDeferredRsc<T>
-  pendingRsc.status = 'pending'
-  pendingRsc.resolve = (value: T, responseDebugInfo: Array<any> | null) => {
-    if (pendingRsc.status === 'pending') {
-      const fulfilledRsc: FulfilledDeferredRsc<T> = pendingRsc as any
-      fulfilledRsc.status = 'fulfilled'
-      fulfilledRsc.value = value
-      if (responseDebugInfo !== null) {
-        // Transfer the debug info to the derived promise.
-        debugInfo.push.apply(debugInfo, responseDebugInfo)
+// The one pending → fulfilled transition. Every node and BFCache entry sharing
+// the object sees the data, its vary params, and its stale time together.
+function fulfillComponentData(
+  rsc: ComponentData,
+  value: React.ReactNode,
+  varyParams: VaryParams | null,
+  staleAt: number,
+  responseDebugInfo: Array<any> | null
+): void {
+  if (rsc.status === 'pending') {
+    const fulfilledRsc: FulfilledComponentData = rsc as any
+    fulfilledRsc.status = 'fulfilled'
+    fulfilledRsc.value = value
+    fulfilledRsc.varyParams = varyParams
+    fulfilledRsc.staleAt = staleAt
+    if (responseDebugInfo !== null) {
+      // The debug info represents the latency between the start of the
+      // navigation and the start of rendering.
+      fulfilledRsc._debugInfo.push.apply(
+        fulfilledRsc._debugInfo,
+        responseDebugInfo
+      )
+    }
+    const listeners = rsc.listeners
+    fulfilledRsc.listeners = null
+    if (listeners !== null) {
+      for (const listener of listeners) {
+        listener(value)
       }
-      resolve(value)
     }
   }
-  pendingRsc.reject = (error: any, responseDebugInfo: Array<any> | null) => {
-    if (pendingRsc.status === 'pending') {
-      const rejectedRsc: RejectedDeferredRsc<T> = pendingRsc as any
-      rejectedRsc.status = 'rejected'
-      rejectedRsc.reason = error
-      if (responseDebugInfo !== null) {
-        // Transfer the debug info to the derived promise.
-        debugInfo.push.apply(debugInfo, responseDebugInfo)
-      }
-      reject(error)
-    }
-  }
-  pendingRsc.tag = DEFERRED
-  pendingRsc._debugInfo = debugInfo
+}
 
-  return pendingRsc
+// Fulfills a segment whose data the server never sent with `null`, which
+// renders as a suspension until the router updates again (see useRenderTree).
+function abortPendingComponentData(rsc: ComponentData): void {
+  fulfillComponentData(rsc, null, null, rsc.staleAt, null)
+}
+
+/**
+ * Reads the data to render for a segment. If the node has a `prefetchRsc`,
+ * that is rendered first and the final `rsc` takes over in a deferred render
+ * once it is fulfilled; otherwise the final data is rendered directly.
+ */
+export function useRenderTree(tree: RouteTree<CacheNode>): React.ReactNode {
+  const cacheNode = tree.data
+  // `useDeferredValue` returns the second argument on initial render, then
+  // re-renders with the first.
+  const rsc = useDeferredValue(
+    cacheNode.rsc,
+    cacheNode.prefetchRsc !== null ? cacheNode.prefetchRsc : cacheNode.rsc
+  )
+  const value = use(rsc)
+  if (value === null) {
+    // The server did not include this segment in its response. Suspend
+    // indefinitely; the router is responsible for triggering a new state
+    // update to un-suspend it.
+    use(unresolvedThenable) as never
+  }
+  return value
 }
 
 /**

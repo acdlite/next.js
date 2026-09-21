@@ -1,10 +1,5 @@
 import type { RouteTree } from './segment-cache/cache'
-import React, {
-  useEffect,
-  useMemo,
-  useInsertionEffect,
-  useDeferredValue,
-} from 'react'
+import React, { use, useEffect, useMemo, useInsertionEffect } from 'react'
 import {
   AppRouterContext,
   LayoutRouterContext,
@@ -42,6 +37,7 @@ import {
   type GlobalErrorState,
 } from './app-router-instance'
 import { legacyUrgentBFCacheRestore, restore, traverse } from './navigator'
+import { useRenderTree } from './render-tree'
 import { getRedirectTypeFromError, getURLFromRedirectError } from './redirect'
 import { isRedirectError } from './redirect-error'
 import { pingVisibleLinks } from './links'
@@ -187,19 +183,7 @@ function Head({
 }: {
   headRenderTree: RouteTree<CacheNode>
 }): React.ReactNode {
-  // If the head has a `prefetchRsc`, it's the statically prefetched data. We
-  // should use that on initial render instead of `rsc`. Then we'll switch to
-  // `rsc` when the dynamic response streams in.
-  const head = headRenderTree.data.rsc
-  const prefetchHead = headRenderTree.data.prefetchRsc
-
-  // If no prefetch data is available, then we go straight to rendering `head`.
-  const resolvedPrefetchRsc = prefetchHead !== null ? prefetchHead : head
-
-  // We use `useDeferredValue` to handle switching between the prefetched and
-  // final values. The second argument is returned on initial render, then it
-  // re-renders with the first argument.
-  return useDeferredValue(head, resolvedPrefetchRsc)
+  return useRenderTree(headRenderTree)
 }
 
 /**
@@ -504,7 +488,7 @@ function Router({
       {/* RootLayoutBoundary enables detection of Suspense boundaries around the root layout.
           When users wrap their layout in <Suspense>, this creates the component stack pattern
           "Suspense -> RootLayoutBoundary" which dynamic-rendering.ts uses to allow dynamic rendering. */}
-      <RootLayoutBoundary>{root.tree.data.rsc}</RootLayoutBoundary>
+      <RootLayoutBoundary>{use(root.tree.data.rsc)}</RootLayoutBoundary>
       <AppRouterAnnouncer tree={tree} />
     </RedirectBoundary>
   )
