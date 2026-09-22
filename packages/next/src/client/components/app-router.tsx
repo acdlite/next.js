@@ -1,5 +1,5 @@
 import type { RouteTree } from './segment-cache/cache'
-import React, { use, useEffect, useMemo, useInsertionEffect } from 'react'
+import React, { useEffect, useMemo, useInsertionEffect } from 'react'
 import {
   AppRouterContext,
   LayoutRouterContext,
@@ -20,7 +20,7 @@ import {
   type NavigationPromises,
 } from '../../shared/lib/hooks-client-context.shared-runtime'
 import { useActionQueue } from './use-action-queue'
-import { setLastCommittedTree } from './router-reducer/reducers/committed-state'
+import { setLastCommittedRoot } from './router-reducer/reducers/committed-state'
 import { AppRouterAnnouncer } from './app-router-announcer'
 import { RedirectBoundary } from './redirect-boundary'
 import { unresolvedThenable } from './unresolved-thenable'
@@ -109,14 +109,14 @@ function HistoryUpdater({
       window.next.__pendingUrl = undefined
     }
 
-    const { tree, pushRef, canonicalUrl, renderedSearch } = appRouterState
+    const { tree, root, pushRef, canonicalUrl, renderedSearch } = appRouterState
 
     if (!checkedMissedTraversalBeforeHistoryWrite) {
       checkedMissedTraversalBeforeHistoryWrite = true
       if (hasMissedTraversal()) {
         // Skip the write: it would overwrite the traversed-to entry's state.
         // The tree was rendered even though the history write is skipped.
-        setLastCommittedTree(tree)
+        setLastCommittedRoot(root)
         return
       }
     }
@@ -148,7 +148,7 @@ function HistoryUpdater({
       window.history.replaceState(historyState, '', canonicalUrl)
     }
 
-    setLastCommittedTree(tree)
+    setLastCommittedRoot(root)
   }, [appRouterState])
 
   useEffect(() => {
@@ -482,13 +482,14 @@ function Router({
     <Head key={createHeadKey(root.head.varyPath)} headRenderTree={root.head} />
   )
 
+  const rootRsc = useRenderTree(root.tree)
   let content = (
     <RedirectBoundary>
       {head}
       {/* RootLayoutBoundary enables detection of Suspense boundaries around the root layout.
           When users wrap their layout in <Suspense>, this creates the component stack pattern
           "Suspense -> RootLayoutBoundary" which dynamic-rendering.ts uses to allow dynamic rendering. */}
-      <RootLayoutBoundary>{use(root.tree.data.rsc)}</RootLayoutBoundary>
+      <RootLayoutBoundary>{rootRsc}</RootLayoutBoundary>
       <AppRouterAnnouncer tree={tree} />
     </RedirectBoundary>
   )

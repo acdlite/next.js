@@ -9,11 +9,11 @@ import { fetchServerResponse } from './router-reducer/fetch-server-response'
 import {
   startPPRNavigation,
   spawnDynamicRequests,
+  createRouterStateFromRenderTree,
   FreshnessPolicy,
   beginLockedNavigation,
   type NavigationLock,
   type NavigationRequestAccumulation,
-  type RootNavigationTask,
 } from './render-tree'
 import { createHrefFromUrl } from './router-reducer/create-href-from-url'
 import {
@@ -25,7 +25,6 @@ import {
   spawnStaticStageCacheWrite,
   writeRuntimePrefetchStreamIntoCache,
   type FulfilledRouteCacheEntry,
-  createRootRouteTree,
 } from './segment-cache/cache'
 import { discoverKnownRoute } from './segment-cache/optimistic-routes'
 import {
@@ -47,6 +46,7 @@ import {
 import { createLinkPrefetchPartialError } from '../../shared/lib/instant-messages'
 import {
   createNavigationSeed,
+  createNavigationSeedFromRouteTree,
   type NavigationSeed,
 } from './segment-cache/decode-server-response'
 
@@ -319,7 +319,6 @@ export function navigateToKnownRoute(
   }
 
   const accumulation: NavigationRequestAccumulation = {
-    separateRefreshUrls: null,
     scrollRef: null,
   }
   // We special case navigations to the exact same URL as the current location.
@@ -341,7 +340,7 @@ export function navigateToKnownRoute(
   // data. If the page segment is fully static and prefetched, the request is
   // skipped. (This is also how refresh() works.)
   const isSamePageNavigation = url.href === currentUrl.href
-  const navigation = startPPRNavigation(
+  const root = startPPRNavigation(
     now,
     currentUrl,
     currentRenderedSearch,
@@ -354,14 +353,13 @@ export function navigateToKnownRoute(
     map,
     restrictToShell
   )
-  if (navigation !== null) {
+  if (root !== null) {
     if (freshnessPolicy !== FreshnessPolicy.Gesture) {
       spawnDynamicRequests(
-        navigation,
+        root,
         url,
         nextUrl,
         freshnessPolicy,
-        accumulation,
         routeCacheEntry,
         navigateType,
         navigationLock,
@@ -373,7 +371,7 @@ export function navigateToKnownRoute(
       state,
       url,
       nextUrl,
-      navigation,
+      root,
       navigationSeed.renderedSearch,
       canonicalUrl,
       navigateType,
@@ -515,25 +513,38 @@ async function navigateToUnknownRoute(
   } = result
 
   // Since the response format of dynamic requests and prefetches is slightly
-  // different, we'll need to massage the data a bit. Create FlightRouterState
-  // tree that simulates what we'd receive as the result of a prefetch.
-  const navigationSeed = createNavigationSeed(
-    now,
-    currentFlightRouterState,
-    transportData,
-    // Navigation responses stream in incrementally, so their vary params
-    // can't be drained here — and nothing consumes them from a navigation
-    // seed (only segment-cache writes read vary params, and those decode
-    // their own, buffered, payloads).
-    null,
-    isResponsePartial,
-    // Navigation responses always include the param values in the tree, so
-    // there's no pathname to parse them from (nor a need to).
-    null,
-    renderedSearch,
-    null,
-    dynamicStaleTime
-  )
+  // different, we'll need to massage the data a bit. Decode the response,
+  // against the current render tree, into a route tree that simulates what
+  // we'd receive as the result of a prefetch.
+  let navigationSeed: NavigationSeed
+  if (transportData !== null) {
+    navigationSeed = createNavigationSeed(
+      now,
+      currentRoot.tree,
+      transportData,
+      // Navigation responses stream in incrementally, so their vary params
+      // can't be drained here — and nothing consumes them from a navigation
+      // seed (only segment-cache writes read vary params, and those decode
+      // their own, buffered, payloads).
+      null,
+      isResponsePartial,
+      // Navigation responses always include the param values in the tree, so
+      // there's no pathname to parse them from (nor a need to).
+      null,
+      renderedSearch,
+      null,
+      dynamicStaleTime
+    )
+  } else {
+    // The server rendered nothing for the request tree, so the response
+    // carries no tree; the seed is the current tree's structure alone.
+    navigationSeed = createNavigationSeedFromRouteTree(
+      now,
+      currentRoot.tree,
+      renderedSearch,
+      dynamicStaleTime
+    )
+  }
 
   // Learn the route pattern so we can predict it for future navigations.
   // hasDynamicRewrite is false because this is a fresh navigation to an
@@ -562,7 +573,7 @@ async function navigateToUnknownRoute(
       staticStageResponse,
       isResponsePartial,
       responseHeaders,
-      currentFlightRouterState,
+      currentRoot.tree,
       renderedSearch,
       map
     )
@@ -572,7 +583,7 @@ async function navigateToUnknownRoute(
     writeRuntimePrefetchStreamIntoCache(
       now,
       runtimePrefetchStream,
-      currentFlightRouterState,
+      currentRoot.tree,
       renderedSearch,
       map
     ).catch(() => {
@@ -661,7 +672,7 @@ export function completeSoftNavigation(
   oldState: AppRouterState,
   url: URL,
   referringNextUrl: string | null,
-  navigation: RootNavigationTask,
+  root: RootRouteTree<CacheNode>,
   renderedSearch: string,
   canonicalUrl: string,
   navigateType: 'push' | 'replace',
@@ -669,13 +680,13 @@ export function completeSoftNavigation(
   scrollRef: ScrollRef | null,
   collectedDebugInfo: Array<unknown> | null
 ) {
+  const tree = createRouterStateFromRenderTree(root.tree)
   // The "Next-Url" is a special representation of the URL that Next.js
   // uses to implement interception routes.
   // TODO: Get rid of this extra traversal by computing this during the
   // same traversal that computes the tree itself. We should also figure out
   // what is the minimum information needed for the server to correctly
   // intercept the route.
-  const tree = navigation.tree.route
   const changedPath = computeChangedPath(oldState.tree, tree)
   const nextUrlForNewRoute = changedPath ? changedPath : oldState.nextUrl
 
@@ -786,7 +797,7 @@ export function completeSoftNavigation(
           ? decodeURIComponent(url.hash.slice(1))
           : oldState.scrollRef.hashFragment,
     },
-    root: createRootRouteTree(navigation.tree.node, navigation.head.node),
+    root,
     tree,
     nextUrl: nextUrlForNewRoute,
     previousNextUrl,
@@ -799,7 +810,7 @@ export function completeTraverseNavigation(
   state: AppRouterState,
   url: URL,
   renderedSearch: string,
-  navigation: RootNavigationTask,
+  root: RootRouteTree<CacheNode>,
   nextUrl: string | null
 ) {
   return {
@@ -813,9 +824,8 @@ export function completeTraverseNavigation(
       preserveCustomHistoryState: true,
     },
     scrollRef: state.scrollRef,
-    root: createRootRouteTree(navigation.tree.node, navigation.head.node),
-    // Restore provided tree
-    tree: navigation.tree.route,
+    root,
+    tree: createRouterStateFromRenderTree(root.tree),
     nextUrl,
     // TODO: We need to restore previousNextUrl, too, which represents the
     // Next-Url that was used to fetch the data. Anywhere we fetch using the

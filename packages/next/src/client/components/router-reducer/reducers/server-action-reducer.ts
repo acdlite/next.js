@@ -479,7 +479,7 @@ export function serverActionReducer(
         // known during restores and refreshes.
         const redirectSeed = createNavigationSeed(
           now,
-          currentFlightRouterState,
+          state.root.tree,
           flightData,
           // Action responses stream in incrementally, so their vary params
           // can't be drained here — and nothing consumes them from a

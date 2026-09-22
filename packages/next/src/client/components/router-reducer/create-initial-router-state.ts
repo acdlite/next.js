@@ -5,12 +5,14 @@ import { extractPathFromFlightRouterState } from './compute-changed-path'
 
 import type { AppRouterState } from './router-reducer-types'
 import { transportNodeToFlightRouterState } from '../../../shared/lib/rsc-transport'
-import { createInitialRenderTreeForHydration } from '../render-tree'
+import {
+  createInitialRenderTreeForHydration,
+  createRouterStateFromRenderTree,
+} from '../render-tree'
 import {
   writeRuntimePrefetchStreamIntoCache,
   spawnStaticStageCacheWrite,
   segmentCacheMap,
-  createRootRouteTree,
 } from '../segment-cache/cache'
 import { createNavigationSeed } from '../segment-cache/decode-server-response'
 import { UnknownDynamicStaleTime } from '../segment-cache/bfcache'
@@ -100,7 +102,7 @@ export function createInitialRouterState({
     initialDynamicStaleTimeSeconds ?? UnknownDynamicStaleTime
   )
   const initialRoot = initialSeed.root
-  const initialNavigation = createInitialRenderTreeForHydration(
+  const initialRenderRoot = createInitialRenderTreeForHydration(
     navigatedAt,
     initialRoot,
     initialSeed.dynamicStaleAt
@@ -160,7 +162,7 @@ export function createInitialRouterState({
               staticStageResponse,
               true, // isResponsePartial
               null, // responseHeaders — no build-id check for initial HTML
-              initialTree,
+              initialRoot.tree,
               initialRenderedSearch,
               segmentCacheMap // hydration writes are bound to the shared map
             )
@@ -190,7 +192,7 @@ export function createInitialRouterState({
           },
           false, // isResponsePartial
           null, // responseHeaders — no build-id check for initial HTML
-          initialTree,
+          initialRoot.tree,
           initialRenderedSearch,
           segmentCacheMap // hydration writes are bound to the shared map
         )
@@ -211,7 +213,7 @@ export function createInitialRouterState({
       writeRuntimePrefetchStreamIntoCache(
         Date.now(),
         initialRuntimePrefetchStream,
-        initialTree,
+        initialRoot.tree,
         initialRenderedSearch,
         segmentCacheMap // hydration writes are bound to the shared map
       ).catch(() => {
@@ -237,11 +239,8 @@ export function createInitialRouterState({
   // complete tree.)
 
   const initialState = {
-    tree: initialNavigation.tree.route,
-    root: createRootRouteTree(
-      initialNavigation.tree.node,
-      initialNavigation.head.node
-    ),
+    tree: createRouterStateFromRenderTree(initialRenderRoot.tree),
+    root: initialRenderRoot,
     pushRef: {
       pendingPush: false,
       mpaNavigation: false,

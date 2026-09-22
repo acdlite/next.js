@@ -1811,6 +1811,76 @@ export function convertFlightRouterStateToRouteTree(
   return tree
 }
 
+/**
+ * The RouteTree analog of convertFlightRouterStateToRouteTree: copies a base
+ * tree's structure — segments, slots, refresh states, hints — into a
+ * structure-only tree whose vary paths are computed fresh under the given
+ * parent and rendered search. Unlike rebaseInactiveRouteTree, which keeps the
+ * base's vary paths, this re-keys the subtree, so it serves the positions of
+ * a decoded response the response carries no information about.
+ */
+export function copyRouteTreeStructure(
+  baseTree: RouteTree<unknown>,
+  requestKey: SegmentRequestKey,
+  parentPartialVaryPath: PartialVaryPath | null,
+  parentRenderedSearch: NormalizedSearch,
+  acc: RouteTreeAccumulator
+): RouteTree<null> {
+  // This segment's param (if any) is a root param iff the segment is at or
+  // above the root layout, which the server marks directly.
+  const isRootParam =
+    (baseTree.prefetchHints & PrefetchHint.IsRootLayoutOrAbove) !== 0
+
+  // If the base tree has a refresh state, then this segment is part of an
+  // inactive parallel route. It has a different rendered search query than
+  // the outer parent route. In order to construct the inactive route correctly,
+  // we must restore the query that was originally used to render it.
+  const refreshState = baseTree.refreshState
+  // The incoming query is authoritative even when a navigation response has
+  // no new segment data. The base tree's page vary paths may still describe
+  // the previous URL. History restores pass their saved query instead.
+  const renderedSearch =
+    refreshState !== null ? refreshState.renderedSearch : parentRenderedSearch
+
+  const tree = createRouteTreeNode<null>(
+    baseTree.segment,
+    isRootParam,
+    requestKey,
+    parentPartialVaryPath,
+    renderedSearch,
+    refreshState,
+    acc
+  )
+  const partialVaryPath = getPartialVaryPath(tree.varyPath)
+
+  let slots: Map<string, RouteTree<null>> | null = null
+  const baseSlots = baseTree.slots
+  if (baseSlots !== null) {
+    for (const [parallelRouteKey, childBaseTree] of baseSlots) {
+      const childRequestKey = appendSegmentRequestKeyPart(
+        requestKey,
+        parallelRouteKey,
+        createSegmentRequestKeyPart(childBaseTree.segment)
+      )
+      const childTree = copyRouteTreeStructure(
+        childBaseTree,
+        childRequestKey,
+        partialVaryPath,
+        renderedSearch,
+        acc
+      )
+      if (slots === null) {
+        slots = new Map()
+      }
+      slots.set(parallelRouteKey, childTree)
+    }
+  }
+
+  tree.slots = slots
+  tree.prefetchHints = baseTree.prefetchHints
+  return tree
+}
+
 export function convertRouteTreeToFlightRouterState<TData>(
   routeTree: RouteTree<TData>
 ): FlightRouterState {
@@ -2555,13 +2625,15 @@ export async function fetchSegmentPrefetchesUsingRuntimeRequest(
   const url = new URL(route.canonicalUrl, location.origin)
   const nextUrl = key.nextUrl
 
-  // When the request tree was derived from a predicted route entry, pass the
-  // node it was predicted from to the write path so the prediction can be
+  // When the request tree was derived from a predicted route entry, the
+  // response is decoded against the entry's tree, and the node it was
+  // predicted from is passed to the write path so the prediction can be
   // disabled if the server's rendered tree diverges from it. For an entry
   // the server resolved this is null: a divergence from it says nothing
   // about route prediction, and its unfulfilled entries take the usual
   // backoff.
   let dynamicRequestTree: FlightRouterState
+  let baseTree: RouteTree<unknown> | null
   let predictedFrom: KnownRoutePart | null
   if (
     spawnedEntries.size === 1 &&
@@ -2569,11 +2641,15 @@ export async function fetchSegmentPrefetchesUsingRuntimeRequest(
   ) {
     // Only the head is pending, so ask the server for metadata only: it skips
     // the segments and renders just the head. The stub is not derived from
-    // the route entry, so divergence from it carries no signal.
+    // the route entry, so divergence from it carries no signal. It has no
+    // children, no refresh state, and no hints, so there is no base for the
+    // response to overlay.
     dynamicRequestTree = MetadataOnlyRequestTree
+    baseTree = null
     predictedFrom = null
   } else {
     dynamicRequestTree = requestTree
+    baseTree = route.root.tree
     predictedFrom = route.predictedFrom
   }
 
@@ -2721,7 +2797,7 @@ export async function fetchSegmentPrefetchesUsingRuntimeRequest(
       fetchStrategy,
       serverData,
       shellResponse,
-      dynamicRequestTree,
+      baseTree,
       predictedFrom,
       // Navigation responses always include the param values in the tree, so
       // there's no pathname to parse them from (nor a need to).
@@ -2787,7 +2863,7 @@ function writeResponsePayloadsIntoCache(
   shellPayload: NavigationFlightResponse | null,
   // The next five are threaded through to every write; see
   // writeServerResponseIntoCache for their meaning.
-  baseTree: FlightRouterState | null,
+  baseTree: RouteTree<unknown> | null,
   predictedFrom: KnownRoutePart | null,
   renderedPathname: string | null,
   renderedSearch: string,
@@ -3090,9 +3166,10 @@ function writeServerResponseIntoCache(
   // response this is one of its payloads: the full response, or the
   // truncated shell decode.
   response: NavigationFlightResponse,
-  // The base router state the response overlays. Null when the response's
-  // tree is root-anchored (per-segment prefetch payloads).
-  baseTree: FlightRouterState | null,
+  // The base route tree the response overlays: the client's current tree for
+  // the route. Null when the response's tree is root-anchored (per-segment
+  // prefetch payloads).
+  baseTree: RouteTree<unknown> | null,
   // Non-null when `baseTree` was predicted: the node in the known route tree
   // whose pattern it was predicted from (see matchKnownRoute). The
   // prediction assumes the URL's rewrite (if any) behaves statically; if the
@@ -3958,7 +4035,9 @@ export function spawnStaticStageCacheWrite(
   // response's `b` field). Null for the initial payload, which arrived in
   // the HTML document and has no build-id check.
   responseHeaders: Headers | null,
-  baseTree: FlightRouterState,
+  // The base route tree the response overlays; see
+  // writeServerResponseIntoCache.
+  baseTree: RouteTree<unknown>,
   renderedSearch: string,
   // The map the work that spawned this response's request is bound to. See
   // writeServerResponseIntoCache.
@@ -4022,7 +4101,9 @@ export function spawnStaticStageCacheWrite(
 export async function writeRuntimePrefetchStreamIntoCache(
   now: number,
   runtimePrefetchStream: ReadableStream<Uint8Array>,
-  baseTree: FlightRouterState,
+  // The base route tree the response overlays; see
+  // writeServerResponseIntoCache.
+  baseTree: RouteTree<unknown>,
   renderedSearch: string,
   // The map the work that spawned this response's request is bound to. See
   // writeServerResponseIntoCache.
