@@ -1328,7 +1328,7 @@ function pingSharedPartOfCacheComponentsTree(
     !didReadChangedParam(
       currentTree.varyPath,
       newTree.varyPath,
-      currentTree.data.varyParams
+      currentTree.data.rsc.varyParams
     )
   ) {
     // The navigation keeps this segment's current data; nothing is fetched
@@ -1662,7 +1662,7 @@ function diffSegmentAgainstCurrent(
       !didReadChangedParam(
         oldTree.varyPath,
         newTree.varyPath,
-        oldTree.data.varyParams
+        oldTree.data.rsc.varyParams
       )
     ) {
       // The navigation keeps its data. Keep traversing.

@@ -14,7 +14,7 @@ export type LoadingModuleData =
   | null
 
 import type { FullTransportData, PartialTransportData } from './rsc-transport'
-import type { VaryParams } from './segment-cache/vary-params-decoding'
+import type { ComponentData } from '../../client/components/render-tree'
 
 /** viewport metadata node */
 export type HeadData = React.ReactNode
@@ -25,36 +25,22 @@ export type HeadData = React.ReactNode
  */
 export type CacheNode = {
   /**
-   * When rsc is not null, it represents the RSC data for the
-   * corresponding segment.
-   *
-   * `null` is a valid React Node but because segment data is always a
-   * <LayoutRouter> component, we can use `null` to represent empty. When it is
-   * null, it represents missing data, and rendering should suspend.
+   * The RSC data for the corresponding segment, shared with every other node
+   * and BFCache entry that renders the same data.
    */
-  rsc: React.ReactNode
+  rsc: ComponentData
 
   /**
    * Represents a static version of the segment that can be shown immediately,
    * and may or may not contain dynamic holes. It's prefetched before a
-   * navigation occurs.
+   * navigation occurs, so it is always fulfilled when the node is created.
    *
    * During rendering, we will choose whether to render `rsc` or `prefetchRsc`
-   * with `useDeferredValue`. As with the `rsc` field, a value of `null` means
-   * no value was provided. In this case, the LayoutRouter will go straight to
-   * rendering the `rsc` value; if that one is also missing, it will suspend and
-   * trigger a lazy fetch.
+   * with `useDeferredValue`. A value of `null` means no value was provided.
+   * In this case, the LayoutRouter will go straight to rendering the `rsc`
+   * value; if that one is missing, it will suspend and trigger a lazy fetch.
    */
-  prefetchRsc: React.ReactNode
-
-  /**
-   * The source of the params `rsc` depends on, from the response that
-   * produced it. Null when unknown: the data came from the segment cache, or
-   * from a render that didn't track params, or `rsc` is still pending — it
-   * is set alongside `rsc` when the response arrives. A navigation that only
-   * changes params this output did not depend on can keep rendering it.
-   */
-  varyParams: VaryParams | null
+  prefetchRsc: ComponentData | null
 
   /**
    * A shared mutable ref that tracks whether this segment should be scrolled
