@@ -1,4 +1,4 @@
-import { getLedgerValue } from './ledgers'
+import { createBitLedger, getLedgerValue } from './ledgers'
 import type { ComponentType, ErrorInfo, JSX, ReactNode } from 'react'
 import type { PartialTransportData } from '../../shared/lib/rsc-transport'
 import type { RenderOpts, PreloadCallbacks } from './types'
@@ -810,6 +810,7 @@ async function generateDynamicRSCPayload(
         ? ctx.componentMod.captureLedgers(responseTree.head, [
             ctx.componentMod.VaryParamsLedger,
             ctx.componentMod.StaleTimeLedger,
+            ctx.componentMod.RuntimeDataLedger,
           ])
         : null
       transportData = {
@@ -828,6 +829,11 @@ async function generateDynamicRSCPayload(
             'staleTimeAccumulator' in headStore &&
             headStore.staleTimeAccumulator !== undefined
               ? capturedHead?.ledgers[1]
+              : undefined,
+          u:
+            headStore?.type === 'prerender' &&
+            headStore.prerenderDataTracking !== null
+              ? capturedHead?.ledgers[2]
               : undefined,
         },
       }
@@ -2312,6 +2318,7 @@ async function getRSCPayload(
     ? ctx.componentMod.captureLedgers(initialHead, [
         ctx.componentMod.VaryParamsLedger,
         ctx.componentMod.StaleTimeLedger,
+        ctx.componentMod.RuntimeDataLedger,
       ])
     : null
 
@@ -2339,6 +2346,11 @@ async function getRSCPayload(
           'staleTimeAccumulator' in headStore &&
           headStore.staleTimeAccumulator !== undefined
             ? capturedHead?.ledgers[1]
+            : undefined,
+        u:
+          headStore?.type === 'prerender' &&
+          headStore.prerenderDataTracking !== null
+            ? capturedHead?.ledgers[2]
             : undefined,
       },
     },
@@ -2489,6 +2501,7 @@ async function getErrorRSCPayload(
     ? ctx.componentMod.captureLedgers(initialHead, [
         ctx.componentMod.VaryParamsLedger,
         ctx.componentMod.StaleTimeLedger,
+        ctx.componentMod.RuntimeDataLedger,
       ])
     : null
 
@@ -2513,6 +2526,11 @@ async function getErrorRSCPayload(
           'staleTimeAccumulator' in headStore &&
           headStore.staleTimeAccumulator !== undefined
             ? capturedHead?.ledgers[1]
+            : undefined,
+        u:
+          headStore?.type === 'prerender' &&
+          headStore.prerenderDataTracking !== null
+            ? capturedHead?.ledgers[2]
             : undefined,
       },
     },
@@ -9520,7 +9538,9 @@ async function prerenderToStream(
         finalStage: RenderStage.Static,
       })
 
-      const prerenderDataTracking = createPrerenderDataTracking()
+      const prerenderDataTracking = createPrerenderDataTracking(
+        createBitLedger(ctx.componentMod.RuntimeDataLedger)
+      )
 
       const finalServerPayloadPrerenderStore: PrerenderStoreModernServer = {
         type: 'prerender',
@@ -9578,8 +9598,12 @@ async function prerenderToStream(
 
       // Embed the runtime data access tracking in the payload so
       // collectSegmentData can replay it per stage. Only needed when the
-      // Flight data will be decomposed into segment prefetches below.
-      finalServerPayload.u = prerenderDataTracking.runtimeDataAccessed.promise
+      // Flight data will be decomposed into segment prefetches below. The
+      // fallback sends one page-wide flag; built-in renders attach a
+      // captured total to each segment and the head instead.
+      finalServerPayload.u = getLedgerValue(
+        prerenderDataTracking.runtimeDataAccessed
+      )
 
       const serverDynamicTracking = createDynamicTrackingState(
         isDebugDynamicAccesses

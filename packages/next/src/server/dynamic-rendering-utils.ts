@@ -1,6 +1,6 @@
 import { InvariantError } from '../shared/lib/invariant-error'
-import { createPromiseWithResolvers } from '../shared/lib/promise-with-resolvers'
 import { EnsureStaticLevel } from './app-render/segment-config/ensure-static'
+import { addToLedger, closeLedger, type BitLedger } from './app-render/ledgers'
 import {
   RenderStage,
   type StagedRenderingController,
@@ -271,7 +271,7 @@ export type PrerenderDataTracking = {
    * However, on the client `isPartial` takes precedence over `runtimeDataAccessed`,
    * so complete segments will not end up being deopted.
    */
-  readonly runtimeDataAccessed: PromiseWithResolvers<boolean>
+  readonly runtimeDataAccessed: BitLedger
 
   /** Corresponds to `PrefetchHint.ShouldAttemptStaticShell`. */
   shouldAttemptStaticShell: boolean
@@ -279,9 +279,11 @@ export type PrerenderDataTracking = {
   shouldAttemptStaticPrefetch: boolean
 }
 
-export function createPrerenderDataTracking(): PrerenderDataTracking {
+export function createPrerenderDataTracking(
+  runtimeDataAccessed: BitLedger
+): PrerenderDataTracking {
   return {
-    runtimeDataAccessed: createPromiseWithResolvers(),
+    runtimeDataAccessed,
     shouldAttemptStaticShell: true,
     shouldAttemptStaticPrefetch: true,
   }
@@ -290,8 +292,9 @@ export function createPrerenderDataTracking(): PrerenderDataTracking {
 export function finishPrerenderDataTracking(
   prerenderDataTracking: PrerenderDataTracking
 ) {
-  // If a runtime data access already resolved this promise, this is a no-op.
-  prerenderDataTracking.runtimeDataAccessed.resolve(false)
+  // Idempotent: a no-op if a runtime data access already marked it. The
+  // `false` row lands here, after all stage content.
+  closeLedger(prerenderDataTracking.runtimeDataAccessed)
 }
 
 /**
@@ -531,12 +534,11 @@ function markRuntimeDataAccessWhenStageReached(
   // NOTE: If we're already in or past the target stage, we can avoid allocating a closure,
   // because `onStage` would've executed the callback immediately anyway.
   if (stageController.currentStage >= targetStage) {
-    runtimeDataAccessed.resolve(true)
+    addToLedger(runtimeDataAccessed)
   } else {
-    stageController.onStage(
-      targetStage,
-      runtimeDataAccessed.resolve.bind(null, true)
-    )
+    stageController.onStage(targetStage, () => {
+      addToLedger(runtimeDataAccessed)
+    })
   }
 }
 

@@ -1338,6 +1338,7 @@ function createTransportNode(
   let varyParams: TransportSegmentData['v'] =
     getLedgerValue(varyParamsAccumulator) ?? null
   let staleTimeTotal: TransportSegmentData['s']
+  let runtimeDataTotal: TransportSegmentData['u']
   if (process.env.__NEXT_LEDGERS) {
     const captured = ctx.componentMod.captureLedgers(
       staleTime !== undefined
@@ -1346,7 +1347,11 @@ function createTransportNode(
             staleTime,
           })
         : rsc,
-      [ctx.componentMod.VaryParamsLedger, ctx.componentMod.StaleTimeLedger]
+      [
+        ctx.componentMod.VaryParamsLedger,
+        ctx.componentMod.StaleTimeLedger,
+        ctx.componentMod.RuntimeDataLedger,
+      ]
     )
     rsc = captured.data
     varyParams = varyParamsAccumulator !== null ? captured.ledgers[0] : null
@@ -1358,6 +1363,9 @@ function createTransportNode(
     ) {
       staleTimeTotal = captured.ledgers[1]
     }
+    if (store?.type === 'prerender' && store.prerenderDataTracking !== null) {
+      runtimeDataTotal = captured.ledgers[2]
+    }
   }
   // Metadata validation must not contribute to the body's totals.
   if (metadataOutlet !== null) {
@@ -1368,6 +1376,7 @@ function createTransportNode(
     p: isPossiblyPartialResponse,
     v: varyParams,
     s: staleTimeTotal,
+    u: runtimeDataTotal,
   }
   if (children !== undefined) {
     node.c = children
