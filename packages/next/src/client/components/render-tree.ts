@@ -34,7 +34,6 @@ import {
   convertReusedFlightRouterStateToRouteTree,
   readSegmentCacheEntryForNavigation,
   waitForSegmentCacheEntry,
-  markRouteEntryAsDynamicRewrite,
   invalidateRouteCacheEntries,
   spawnStaticStageCacheWrite,
   writeRuntimePrefetchStreamIntoCache,
@@ -46,7 +45,7 @@ import type { NormalizedSearch } from './segment-cache/cache-key'
 import type { CacheMap } from './segment-cache/cache-map'
 import {
   getRenderedSearchFromVaryPath,
-  type PageVaryPath,
+  type VaryPath,
 } from './segment-cache/vary-path'
 import {
   readFromBFCache,
@@ -220,7 +219,7 @@ export function startPPRNavigation(
   oldCacheNode: CacheNode | null,
   oldRouterState: FlightRouterState,
   newRouteTree: RouteTree<RSCSegmentData | null>,
-  newMetadataVaryPath: PageVaryPath | null,
+  newMetadataVaryPath: VaryPath | null,
   freshness: FreshnessPolicy,
   seedHead: HeadData | null,
   seedDynamicStaleAt: number,
@@ -265,7 +264,7 @@ function updateCacheNodeOnNavigation(
   oldCacheNode: CacheNode | void,
   oldRouterState: FlightRouterState,
   newRouteTree: RouteTree<RSCSegmentData | null>,
-  newMetadataVaryPath: PageVaryPath | null,
+  newMetadataVaryPath: VaryPath | null,
   freshness: FreshnessPolicy,
   seedHead: HeadData | null,
   seedDynamicStaleAt: number,
@@ -657,7 +656,7 @@ function accumulateScrollRef(
 function createCacheNodeOnNavigation(
   navigatedAt: number,
   newRouteTree: RouteTree<RSCSegmentData | null>,
-  newMetadataVaryPath: PageVaryPath | null,
+  newMetadataVaryPath: VaryPath | null,
   freshness: FreshnessPolicy,
   seedHead: HeadData | null,
   seedDynamicStaleAt: number,
@@ -781,7 +780,7 @@ function createCacheNodeOnNavigation(
 function createSegmentFromRouteTree(
   newRouteTree: RouteTree<RSCSegmentData | null>
 ): Segment {
-  if (newRouteTree.isPage) {
+  if (newRouteTree.segment === PAGE_SEGMENT_KEY) {
     // In a dynamic server response, the server embeds the search params into
     // the segment key, but in a static one it's omitted. The client handles
     // this inconsistency by adding the search params back right at the end.
@@ -954,7 +953,7 @@ function createCacheNodeForSegment(
   now: number,
   tree: RouteTree<RSCSegmentData | null>,
   seedRsc: React.ReactNode | null,
-  metadataVaryPath: PageVaryPath | null,
+  metadataVaryPath: VaryPath | null,
   seedHead: HeadData | null,
   freshness: FreshnessPolicy,
   dynamicStaleAt: number,
@@ -979,7 +978,7 @@ function createCacheNodeForSegment(
   // also be able to use that data without spawning a new request. (This is
   // referred to as the "seed" data.)
 
-  const isPage = tree.isPage
+  const isPage = tree.segment === PAGE_SEGMENT_KEY
 
   // During certain kinds of navigations, we may be able to render from
   // the BFCache.
@@ -1712,10 +1711,15 @@ function dispatchRetryDueToTreeMismatch(
     | FreshnessPolicy.RefreshAll
     | FreshnessPolicy.HistoryTraversal
 ) {
-  // If the navigation used a route prediction, mark it as having a dynamic
-  // rewrite since it resulted in a mismatch.
+  // If the navigation used a route prediction, mark the node it was predicted
+  // from as having a dynamic rewrite since it resulted in a mismatch. A route
+  // entry the server resolved has nothing to mark: nothing was predicted
+  // from it.
   if (routeCacheEntry !== null) {
-    markRouteEntryAsDynamicRewrite(routeCacheEntry)
+    const predictedFrom = routeCacheEntry.predictedFrom
+    if (predictedFrom !== null) {
+      predictedFrom.hasDynamicRewrite = true
+    }
   } else if (seed !== null) {
     // Even without a direct reference to the route cache entry, we can still
     // mark the route as having a dynamic rewrite by traversing the known route
@@ -1740,8 +1744,9 @@ function dispatchRetryDueToTreeMismatch(
     }
   }
 
-  // Invalidate all route cache entries. Other entries may have been derived
-  // from the template before we knew it had a dynamic rewrite. This also
+  // Invalidate all route cache entries. If the navigation used a route entry
+  // the server resolved, its tree is what the server just contradicted, so
+  // the retry must re-fetch it rather than navigate with it again. This also
   // triggers re-prefetching of visible links.
   invalidateRouteCacheEntries(retryNextUrl, baseTree)
 

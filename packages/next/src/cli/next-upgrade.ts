@@ -2,6 +2,7 @@ import { spawn } from 'child_process'
 import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'fs/promises'
 import { tmpdir } from 'os'
 import { dirname, join } from 'path'
+import { major, prerelease, valid } from 'next/dist/compiled/semver'
 import * as Log from '../build/output/log'
 import createSpinner from '../build/spinner'
 import { findDir } from '../lib/find-pages-dir'
@@ -143,6 +144,31 @@ async function resolveAIUpgradeType(
     : 'security'
 }
 
+async function resolveCanaryVersion(): Promise<string> {
+  try {
+    const response = await fetch('https://registry.npmjs.org/next/canary', {
+      signal: AbortSignal.timeout(10_000),
+      cache: 'no-store',
+      redirect: 'error',
+    })
+
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`)
+    }
+
+    const { version } = await response.json()
+    if (typeof version !== 'string' || valid(version) !== version) {
+      throw new Error('Invalid canary version')
+    }
+
+    return version
+  } catch (error) {
+    throw new Error('Could not fetch the latest Next.js canary from npm.', {
+      cause: error,
+    })
+  }
+}
+
 export async function spawnNextUpgrade(
   directory: string | undefined,
   options: NextUpgradeOptions
@@ -151,39 +177,55 @@ export async function spawnNextUpgrade(
 
   if (options.ai) {
     try {
-      // A delegated canary uses itself. Local runs and evals use their invoked build.
-      const useCurrentCli = process.env.__NEXT_UPGRADE_USE_CURRENT_CLI === '1'
+      const expectedVersion = process.env.__NEXT_UPGRADE_EXPECTED_CLI_VERSION
+      delete process.env.__NEXT_UPGRADE_EXPECTED_CLI_VERSION
       delete process.env.__NEXT_UPGRADE_USE_CURRENT_CLI
 
-      if (!useCurrentCli) {
-        Log.info(dim('Preparing upgrade...'))
-        const [command, ...runnerArgs] = getNpxCommand(baseDir).split(' ')
-        const aiArgument =
-          typeof options.ai === 'string' ? `--ai=${options.ai}` : '--ai'
-        const args = [
-          ...runnerArgs,
-          'next@canary',
-          'upgrade',
-          baseDir,
-          aiArgument,
-        ]
-
-        if (options.verbose) {
-          args.push('--verbose')
+      if (expectedVersion !== undefined) {
+        // Delegated upgrades and evals use their pinned CLI without another lookup.
+        if (process.env.__NEXT_VERSION !== expectedVersion) {
+          throw new Error(
+            `Expected Next.js ${expectedVersion} for the upgrade, but launched ${process.env.__NEXT_VERSION}.`
+          )
         }
+      } else {
+        Log.info(dim('Preparing upgrade...'))
+        const canaryVersion = await resolveCanaryVersion()
+        if (process.env.__NEXT_VERSION !== canaryVersion) {
+          const [command, ...runnerArgs] = getNpxCommand(baseDir).split(' ')
+          const aiArgument =
+            typeof options.ai === 'string' ? `--ai=${options.ai}` : '--ai'
+          const args = [
+            ...runnerArgs,
+            `next@${canaryVersion}`,
+            'upgrade',
+            baseDir,
+            aiArgument,
+          ]
 
-        process.exitCode = await runChildProcess(command, args, {
-          cwd: baseDir,
-          stdio: 'inherit',
-          env: { ...process.env, __NEXT_UPGRADE_USE_CURRENT_CLI: '1' },
-        })
-        return
+          if (options.verbose) {
+            args.push('--verbose')
+          }
+
+          process.exitCode = await runChildProcess(command, args, {
+            cwd: baseDir,
+            stdio: 'inherit',
+            env: {
+              ...process.env,
+              __NEXT_UPGRADE_EXPECTED_CLI_VERSION: canaryVersion,
+              // Older canaries recognize only this recursion guard.
+              __NEXT_UPGRADE_USE_CURRENT_CLI: '1',
+            },
+          })
+          return
+        }
       }
 
       // A workspace root must not launch an upgrade for an unspecified app.
       if (!findDir(baseDir, 'app') && !findDir(baseDir, 'pages')) {
         throw new Error(
-          'No Next.js app found in this directory. Run the command from an app directory or pass its path.'
+          'No Next.js app found in this directory. Run the command from an app directory or pass its path:\n\n' +
+            `next upgrade [directory] --ai${typeof options.ai === 'string' ? `=${options.ai}` : ''}`
         )
       }
 
@@ -212,11 +254,13 @@ export async function spawnNextUpgrade(
         return
       }
 
-      const needsVersionMigration =
+      const needsVersionUpdate =
         result.installedVersion !== result.targetVersion
+      const crossesMajor =
+        major(result.installedVersion) !== major(result.targetVersion)
 
       Log.info(
-        needsVersionMigration
+        needsVersionUpdate
           ? `Upgrade: Next.js ${result.installedVersion} → ${result.targetVersion}`
           : `Future Defaults: Next.js ${result.installedVersion}`
       )
@@ -225,22 +269,94 @@ export async function spawnNextUpgrade(
       // Retain them outside the app so dependency changes cannot remove them.
       const bundledDocs = join(__dirname, '../docs')
       const runDirectory = await mkdtemp(join(tmpdir(), 'next-upgrade-'))
-      const guidePath = join(
+      const guideName = crossesMajor
+        ? 'different-major'
+        : needsVersionUpdate
+          ? 'same-major'
+          : 'future-defaults'
+      const guideDirectory = 'docs/01-app/02-guides/upgrading/agentic-upgrade'
+      const sharedGuidePath = join(runDirectory, guideDirectory, 'shared.md')
+      const guidePath = join(runDirectory, guideDirectory, `${guideName}.md`)
+      const futureGuidePath = join(
         runDirectory,
-        'docs/01-app/02-guides/upgrading/agentic-upgrade.md'
+        guideDirectory,
+        'future-defaults.md'
       )
       const guidesSpinner = createSpinner('Preparing upgrade')
 
       try {
-        for (const router of ['01-app', '02-pages']) {
+        await mkdir(dirname(guidePath), { recursive: true })
+        await cp(
+          join(
+            bundledDocs,
+            '01-app/02-guides/upgrading/agentic-upgrade/shared.md'
+          ),
+          sharedGuidePath
+        )
+        await cp(
+          join(
+            bundledDocs,
+            '01-app/02-guides/upgrading/agentic-upgrade',
+            `${guideName}.md`
+          ),
+          guidePath
+        )
+
+        if (crossesMajor) {
           await cp(
-            join(bundledDocs, router, '02-guides/upgrading'),
-            join(runDirectory, 'docs', router, '02-guides/upgrading'),
-            { recursive: true }
+            join(bundledDocs, '01-app/02-guides/upgrading/codemods.md'),
+            join(runDirectory, 'docs/01-app/02-guides/upgrading/codemods.md')
+          )
+          for (
+            let version = major(result.installedVersion) + 1;
+            version <= major(result.targetVersion);
+            version++
+          ) {
+            const router = version < 14 ? '02-pages' : '01-app'
+            const destination = join(
+              runDirectory,
+              'docs',
+              router,
+              '02-guides/upgrading',
+              `version-${version}.md`
+            )
+            await mkdir(dirname(destination), { recursive: true })
+            await cp(
+              join(
+                bundledDocs,
+                router,
+                '02-guides/upgrading',
+                `version-${version}.md`
+              ),
+              destination
+            )
+          }
+          if (major(result.installedVersion) < 13) {
+            await mkdir(
+              join(runDirectory, 'docs/02-pages/02-guides/upgrading'),
+              { recursive: true }
+            )
+            await cp(
+              join(bundledDocs, '02-pages/02-guides/upgrading/codemods.md'),
+              join(
+                runDirectory,
+                'docs/02-pages/02-guides/upgrading/codemods.md'
+              )
+            )
+          }
+        }
+
+        if (upgradeType === 'future' && needsVersionUpdate) {
+          await cp(
+            join(
+              bundledDocs,
+              '01-app/02-guides/upgrading/agentic-upgrade/future-defaults.md'
+            ),
+            futureGuidePath
           )
         }
 
-        if (needsVersionMigration) {
+        if (crossesMajor) {
           const codemodVersion = process.env.__NEXT_VERSION
           if (!codemodVersion) {
             throw new Error('Could not determine the @next/codemod version.')
@@ -310,31 +426,34 @@ export async function spawnNextUpgrade(
       const references = result.references
         .map((reference) => `- ${reference}`)
         .join('\n')
+      const releaseKind =
+        prerelease(result.targetVersion)?.[0] === 'canary' ? 'canary' : 'stable'
       const reason =
         upgradeType === 'security'
           ? 'the installed version is affected by a published security advisory'
           : upgradeType === 'latest'
-            ? 'a newer stable Next.js release is available'
-            : 'the Future policy applies the latest stable release and adopts its Future Defaults'
-      const futureDefaultsPrompt = preparedFutureDefaults.length
-        ? `
-${needsVersionMigration ? 'After completing and verifying the version migration, adopt' : 'Adopt'} these Future Defaults in order:
-${preparedFutureDefaults
-  .map(
-    (futureDefault) =>
-      `- ${futureDefault.name}\n${futureDefault.documents.map((document) => `  - Read and follow ${JSON.stringify(document)}.`).join('\n')}`
-  )
-  .join('\n')}
-Complete each adoption. Temporary opt-outs and TODO markers are intermediate work only; do not stop until they are removed and the adoption is fully verified.`
-        : ''
+            ? `a newer ${releaseKind} Next.js release is available`
+            : `the Future policy applies the latest ${releaseKind} release${preparedFutureDefaults.length > 0 ? ' and adopts its Future Defaults' : ''}`
+      const futureDefaultsList = preparedFutureDefaults
+        .map(
+          (futureDefault) =>
+            `- ${futureDefault.name}\n${futureDefault.documents.map((document) => `  - Read and follow ${JSON.stringify(document)}.`).join('\n')}`
+        )
+        .join('\n')
+      const futureDefaultsPrompt =
+        upgradeType === 'future'
+          ? `${needsVersionUpdate ? `After completing and verifying the version update, read and follow ${JSON.stringify(futureGuidePath)}.\n` : ''}${futureDefaultsList ? `Adopt these Future Defaults in order:\n${futureDefaultsList}\nComplete each adoption. Temporary opt-outs and TODO markers are intermediate work only; do not stop until they are removed and the adoption is fully verified.` : 'No Future Defaults are pending adoption.'}`
+          : ''
 
       // Pass resolved inputs directly; the agent owns repairs and verification.
-      const taskSummary = needsVersionMigration
+      const taskSummary = needsVersionUpdate
         ? `We're upgrading the app in ${JSON.stringify(baseDir)} from Next.js ${result.installedVersion} to ${result.targetVersion} because ${reason}.`
         : `We're adopting the Future Defaults available to the app in ${JSON.stringify(baseDir)}, which already uses Next.js ${result.installedVersion}.`
-      const prompt = `Read and follow every applicable instruction in ${JSON.stringify(guidePath)} before proceeding.
+      const prompt = `Read and follow ${JSON.stringify(sharedGuidePath)} first. Complete its duplicate checks before changing files. Then read and follow every applicable instruction in ${JSON.stringify(guidePath)}.
 
 ${taskSummary}
+
+Unless the user explicitly requests otherwise, perform the upgrade in a separate Git worktree. Run upgrade commands from this app's corresponding directory in that worktree.
 
 Set \`experimental.agenticAutoUpgrade\` to ${JSON.stringify(upgradeType)} in the app's Next.js config as part of this upgrade. Preserve unrelated configuration. If the target Next.js version does not support this option, skip the setting and report why.
 
