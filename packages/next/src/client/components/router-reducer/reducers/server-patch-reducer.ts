@@ -33,7 +33,7 @@ export function serverPatchReducer(
   }
   const currentUrl = new URL(state.canonicalUrl, location.origin)
   const currentRenderedSearch = state.renderedSearch
-  if (action.previousTree !== state.tree) {
+  if (action.previousRoot !== state.root) {
     // There was another, more recent navigation since the once that
     // mismatched. We can abort the retry, but we still need to refresh the
     // page to evict any stale dynamic data.

@@ -11,12 +11,15 @@ import {
   startPPRNavigation,
   type NavigationRequestAccumulation,
 } from '../../render-tree'
-import type { FlightRouterState } from '../../../../shared/lib/app-router-types'
 import {
   completeHardNavigation,
   completeTraverseNavigation,
 } from '../../app-router-state'
-import { createNavigationSeed } from '../../segment-cache/decode-server-response'
+import {
+  type NavigationSeed,
+  createNavigationSeedFromRouteTree,
+  createNavigationSeedFromRouterState,
+} from '../../segment-cache/decode-server-response'
 import { segmentCacheMap } from '../../segment-cache/cache'
 import { UnknownDynamicStaleTime } from '../../segment-cache/bfcache'
 
@@ -24,49 +27,49 @@ export function restoreReducer(
   state: ReadonlyReducerState,
   action: RestoreAction
 ): ReducerState {
+  const currentUrl = new URL(state.canonicalUrl, location.origin)
+  const restoredUrl = action.url
+  // TODO: Store the dynamic stale time on the top-level state so it's known
+  // during restores and refreshes.
+  const now = Date.now()
+
   // This action is used to restore the router state from the history state.
   // However, it's possible that the history state no longer contains the `FlightRouterState`.
   // We will copy over the internal state on pushState/replaceState events, but if a history entry
   // occurred before hydration, or if the user navigated to a hash using a regular anchor link,
   // the history state will not contain the `FlightRouterState`.
   // In this case, we'll continue to use the existing tree so the router doesn't get into an invalid state.
-  let treeToRestore: FlightRouterState | undefined
-  let renderedSearch: string | undefined
+  let renderedSearch: string
+  let restoredNextUrl: string
+  let restoreSeed: NavigationSeed
   const historyState = action.historyState
   if (historyState) {
-    treeToRestore = historyState.tree
     renderedSearch = historyState.renderedSearch
+    restoredNextUrl =
+      extractPathFromFlightRouterState(historyState.tree) ??
+      restoredUrl.pathname
+    restoreSeed = createNavigationSeedFromRouterState(
+      now,
+      historyState.tree,
+      renderedSearch,
+      UnknownDynamicStaleTime
+    )
   } else {
-    treeToRestore = state.tree
     renderedSearch = state.renderedSearch
+    restoredNextUrl =
+      extractPathFromFlightRouterState(state.tree) ?? restoredUrl.pathname
+    restoreSeed = createNavigationSeedFromRouteTree(
+      now,
+      state.root.tree,
+      renderedSearch,
+      UnknownDynamicStaleTime
+    )
   }
 
-  const currentUrl = new URL(state.canonicalUrl, location.origin)
-  const restoredUrl = action.url
-  const restoredNextUrl =
-    extractPathFromFlightRouterState(treeToRestore) ?? restoredUrl.pathname
-
-  const now = Date.now()
-  // TODO: Store the dynamic stale time on the top-level state so it's known
-  // during restores and refreshes.
   const accumulation: NavigationRequestAccumulation = {
-    separateRefreshUrls: null,
     scrollRef: null,
   }
-  const restoreSeed = createNavigationSeed(
-    now,
-    treeToRestore,
-    // No transport data (and so no vary params, no partiality, and no
-    // pathname to parse params from) — this converts the base tree alone.
-    null,
-    null,
-    true,
-    null,
-    renderedSearch,
-    null,
-    UnknownDynamicStaleTime
-  )
-  const navigation = startPPRNavigation(
+  const root = startPPRNavigation(
     now,
     currentUrl,
     state.renderedSearch,
@@ -82,15 +85,14 @@ export function restoreReducer(
     false
   )
 
-  if (navigation === null) {
+  if (root === null) {
     return completeHardNavigation(state, restoredUrl, 'replace')
   }
   spawnDynamicRequests(
-    navigation,
+    root,
     restoredUrl,
     restoredNextUrl,
     FreshnessPolicy.HistoryTraversal,
-    accumulation,
     // History traversal doesn't use route prediction, so there's no route
     // cache entry to mark as having a dynamic rewrite on mismatch. If a
     // mismatch occurs, the retry handler will traverse the known route tree
@@ -116,7 +118,7 @@ export function restoreReducer(
     state,
     restoredUrl,
     renderedSearch,
-    navigation,
+    root,
     restoredNextUrl
   )
 }

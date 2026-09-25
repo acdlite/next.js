@@ -61,8 +61,8 @@ import {
   type RSCSegmentData,
   type RefreshState,
   type RouteTreeAccumulator,
-  convertFlightRouterStateToRouteTree,
   convertRootFlightRouterStateToRouteTree,
+  copyRouteTreeStructure,
   createMetadataRouteTree,
   createRootRouteTree,
   getHeadRequestKey,
@@ -80,9 +80,9 @@ export type NavigationSeed = {
   // Whether the response rendered a segment whose identity differs from the
   // base tree's at the same position (inactive parallel route branches are
   // expected to differ and don't count). Only meaningful when the base is a
-  // request tree derived from a cached route entry, as during a prefetch:
-  // divergence then means the entry doesn't describe what the server renders
-  // — the URL has a rewrite that behaves dynamically (see
+  // cached route entry's tree, as during a prefetch: divergence then means
+  // the entry doesn't describe what the server renders — the URL has a
+  // rewrite that behaves dynamically (see
   // fetchSegmentPrefetchesUsingRuntimeRequest). During a navigation the base
   // is the current page's tree, so divergence carries no signal. False when
   // there was no base to compare against.
@@ -92,23 +92,22 @@ export type NavigationSeed = {
 /**
  * During a client navigation or prefetch, the server responds with a
  * transport tree that covers only the parts of the route that have changed.
- * This overlays it onto the base tree to produce a full RouteTree — slots the
- * response carries no information about are reused from the client's current
- * state — with the response's render output (RSCSegmentData) attached to
- * each node.
+ * This overlays it onto the base tree — the client's current route tree — to
+ * produce a full RouteTree, with the response's render output
+ * (RSCSegmentData) attached to each node. Slots the response carries no
+ * information about are reused from the base tree.
  *
- * "Create", not "decode": callers may pass no transport data at all
- * (refreshes and history restores do), in which case this converts the base
- * tree alone rather than decoding a response.
+ * Refreshes and history restores build their seed from an existing tree with
+ * no response; see createNavigationSeedFromRouteTree and
+ * createNavigationSeedFromRouterState.
  */
 export function createNavigationSeed(
   now: number,
   // Null when the response is not an overlay over existing client state —
   // per-segment prefetch responses, whose root-anchored tree covers its own
-  // spine. Must be non-null when transportData is null (there'd be nothing
-  // to convert otherwise).
-  currentTree: FlightRouterState | null,
-  transportData: PartialTransportData | null,
+  // spine, and the initial payload, which is a full render from the root.
+  currentTree: RouteTree<unknown> | null,
+  transportData: PartialTransportData,
   // The response's root vary params (its `r` field), which userspace
   // tracking emits once at the response level: the root params accessed
   // anywhere in the response, unioned into the head's and every segment's
@@ -150,85 +149,169 @@ export function createNavigationSeed(
     metadataVaryPath: null,
     treeDivergedFromBase: false,
   }
-  let routeTree: RouteTree<RSCSegmentData | null>
+  const routeTree = decodeTransportTreeIntoRouteTree(
+    transportData.t,
+    currentTree,
+    rootVaryParams,
+    isResponsePartial,
+    renderedPathname,
+    normalizedRenderedSearch,
+    acc
+  )
   let headData: RSCSegmentData | null = null
-  if (transportData !== null) {
-    routeTree = decodeTransportTreeIntoRouteTree(
-      transportData.t,
-      currentTree,
-      rootVaryParams,
-      isResponsePartial,
-      renderedPathname,
-      normalizedRenderedSearch,
-      acc
-    )
-    const transportHead = transportData.h
-    if (transportHead !== undefined) {
-      let staleTimeSeconds: number | null = null
-      if (transportHead.s !== undefined) {
-        // A pending total keeps the response-level fallback. Only a fulfilled
-        // empty capture uses the segment's default stale time.
-        const value = readMinLedger(transportHead.s, null)
-        if (value !== null) {
-          staleTimeSeconds =
-            value === undefined || isNaN(value)
-              ? process.env.__NEXT_LEDGERS
-                ? STATIC_STALETIME_MS / 1000
-                : null
-              : value
-        }
-      }
-      // The wire form of `p` determines which signal is authoritative for
-      // the head's partiality, mirroring the per-node rule in
-      // decodeTransportNode:
-      //
-      // - Promise form (per-segment prefetch responses, fully buffered
-      //   before they're decoded): partiality is encoded exactly, per node,
-      //   via the staged encoding, so the thenable-status read is
-      //   authoritative.
-      // - Boolean form (navigation and live-render responses): when Cache
-      //   Components is enabled, the server's flag (isPossiblyPartialHead in
-      //   app-render.tsx) is unreliable: it's computed before the head is
-      //   serialized, so it's conservatively `true` for every
-      //   statically-generated PPR page — even pages whose head is actually
-      //   complete — and it's `false` for live-render responses whose head
-      //   is actually partial (e.g. a route with an async
-      //   `generateMetadata`). So we ignore it and derive the head's
-      //   partiality from whether the response itself was partial, exactly
-      //   as the per-node rule does for segments. A non-partial response
-      //   carries a complete head; a partial (postponed) one does not.
-      //   Without Cache Components, the server sends the correct
-      //   isHeadPartial, so the wire boolean is used as-is.
-      headData = {
-        rsc: transportHead.r,
-        isPartial:
-          typeof transportHead.p === 'boolean'
-            ? process.env.__NEXT_CACHE_COMPONENTS
-              ? isResponsePartial
-              : transportHead.p
-            : readFulfilledIsPartial(transportHead.p),
-        varyParams: decodeVaryParams(transportHead.v, rootVaryParams),
-        staleTimeSeconds,
-        needsRuntimeRequest:
-          transportHead.u !== undefined
-            ? readBitLedger(transportHead.u, false, true)
-            : null,
+  const transportHead = transportData.h
+  if (transportHead !== undefined) {
+    let staleTimeSeconds: number | null = null
+    if (transportHead.s !== undefined) {
+      // A pending total keeps the response-level fallback. Only a fulfilled
+      // empty capture uses the segment's default stale time.
+      const value = readMinLedger(transportHead.s, null)
+      if (value !== null) {
+        staleTimeSeconds =
+          value === undefined || isNaN(value)
+            ? process.env.__NEXT_LEDGERS
+              ? STATIC_STALETIME_MS / 1000
+              : null
+            : value
       }
     }
-  } else {
-    if (currentTree === null) {
-      throw new InvariantError(
-        'Cannot convert a server response with no transport data and no ' +
-          'base tree.'
-      )
+    // The wire form of `p` determines which signal is authoritative for
+    // the head's partiality, mirroring the per-node rule in
+    // decodeTransportNode:
+    //
+    // - Promise form (per-segment prefetch responses, fully buffered
+    //   before they're decoded): partiality is encoded exactly, per node,
+    //   via the staged encoding, so the thenable-status read is
+    //   authoritative.
+    // - Boolean form (navigation and live-render responses): when Cache
+    //   Components is enabled, the server's flag (isPossiblyPartialHead in
+    //   app-render.tsx) is unreliable: it's computed before the head is
+    //   serialized, so it's conservatively `true` for every
+    //   statically-generated PPR page — even pages whose head is actually
+    //   complete — and it's `false` for live-render responses whose head
+    //   is actually partial (e.g. a route with an async
+    //   `generateMetadata`). So we ignore it and derive the head's
+    //   partiality from whether the response itself was partial, exactly
+    //   as the per-node rule does for segments. A non-partial response
+    //   carries a complete head; a partial (postponed) one does not.
+    //   Without Cache Components, the server sends the correct
+    //   isHeadPartial, so the wire boolean is used as-is.
+    headData = {
+      rsc: transportHead.r,
+      isPartial:
+        typeof transportHead.p === 'boolean'
+          ? process.env.__NEXT_CACHE_COMPONENTS
+            ? isResponsePartial
+            : transportHead.p
+          : readFulfilledIsPartial(transportHead.p),
+      varyParams: decodeVaryParams(transportHead.v, rootVaryParams),
+      staleTimeSeconds,
+      needsRuntimeRequest:
+        transportHead.u !== undefined
+          ? readBitLedger(transportHead.u, false, true)
+          : null,
     }
-    routeTree = convertRootFlightRouterStateToRouteTree(
-      currentTree,
-      normalizedRenderedSearch,
-      acc
-    )
   }
 
+  return finishNavigationSeed(
+    now,
+    routeTree,
+    headData,
+    metadataVaryPath,
+    normalizedRenderedSearch,
+    acc,
+    dynamicStaleTimeSeconds
+  )
+}
+
+/**
+ * Builds a NavigationSeed from the client's current route tree with no
+ * response (a refresh, or a history restore whose entry carries no router
+ * state): the tree's structure with no data, so every segment is fetched.
+ */
+export function createNavigationSeedFromRouteTree(
+  now: number,
+  currentTree: RouteTree<unknown>,
+  // The router state stores it as a plain string, so it is re-branded here.
+  renderedSearch: string,
+  dynamicStaleTimeSeconds: number
+): NavigationSeed {
+  const normalizedRenderedSearch = renderedSearch as NormalizedSearch
+  const acc: RouteTreeAccumulator = {
+    metadataVaryPath: null,
+    treeDivergedFromBase: false,
+  }
+  const routeTree = copyRouteTreeStructure(
+    currentTree,
+    ROOT_SEGMENT_REQUEST_KEY,
+    null,
+    normalizedRenderedSearch,
+    acc
+  )
+  return finishNavigationSeed(
+    now,
+    routeTree,
+    null,
+    null,
+    normalizedRenderedSearch,
+    acc,
+    dynamicStaleTimeSeconds
+  )
+}
+
+/**
+ * Builds a NavigationSeed from a history entry's router state, the only
+ * FlightRouterState the client still keeps a tree in (see restoreReducer).
+ */
+export function createNavigationSeedFromRouterState(
+  now: number,
+  routerState: FlightRouterState,
+  // The history entry stores it as a plain string, so it is re-branded here.
+  renderedSearch: string,
+  dynamicStaleTimeSeconds: number
+): NavigationSeed {
+  const normalizedRenderedSearch = renderedSearch as NormalizedSearch
+  const acc: RouteTreeAccumulator = {
+    metadataVaryPath: null,
+    treeDivergedFromBase: false,
+  }
+  const routeTree = convertRootFlightRouterStateToRouteTree(
+    routerState,
+    normalizedRenderedSearch,
+    acc
+  )
+  return finishNavigationSeed(
+    now,
+    routeTree,
+    null,
+    null,
+    normalizedRenderedSearch,
+    acc,
+    dynamicStaleTimeSeconds
+  )
+}
+
+/**
+ * Finishes a NavigationSeed from a built route tree — decoded from a
+ * response, copied from the current tree, or converted from a history
+ * entry's router state: keys the head beside the tree and stamps the seed's
+ * staleness.
+ */
+function finishNavigationSeed(
+  now: number,
+  routeTree: RouteTree<RSCSegmentData | null>,
+  // The response's head output; null when the response carries no head, or
+  // when there is no response.
+  headData: RSCSegmentData | null,
+  // Where to key the head. Null derives it from the route's own first page
+  // node, recorded in `acc` while the tree was built (see
+  // createRouteTreeNode).
+  metadataVaryPath: VaryPath | null,
+  renderedSearch: NormalizedSearch,
+  // The accumulator the tree was built with.
+  acc: RouteTreeAccumulator,
+  dynamicStaleTimeSeconds: number
+): NavigationSeed {
   if (metadataVaryPath === null) {
     metadataVaryPath = acc.metadataVaryPath
     if (metadataVaryPath === null) {
@@ -250,7 +333,7 @@ export function createNavigationSeed(
         headData
       )
     ),
-    renderedSearch: normalizedRenderedSearch,
+    renderedSearch,
     dynamicStaleAt: computeDynamicStaleAt(now, dynamicStaleTimeSeconds),
     treeDivergedFromBase: acc.treeDivergedFromBase,
   }
@@ -261,8 +344,6 @@ export function createNavigationSeed(
  * information (vary paths, the normalized segment value, the refresh state)
  * initialized, and the remaining fields set to their defaults. The caller
  * finishes initializing those in place after recursing into the children.
- * Shared by FlightRouterState conversion, transport decoding, and subtree
- * rebasing so their routing identity stays consistent.
  */
 export function createRouteTreeNode<TData>(
   originalSegment: FlightRouterStateSegment,
@@ -325,7 +406,7 @@ export function createRouteTreeNode<TData>(
 
 /**
  * Decodes a response's transport tree into a RouteTree, using the client's
- * current router state as the base for the parts of the route the response
+ * current route tree as the base for the parts of the route the response
  * carries no information about.
  *
  * The response is an overlay over the base:
@@ -337,18 +418,12 @@ export function createRouteTreeNode<TData>(
  * - Skipped nodes (data with a null rsc) sit on the path from the root down
  *   to the rendered subtrees. The client is expected to already have them,
  *   so their refresh state and hints are inherited from the base tree, and
- *   any slot the response doesn't mention is reused from the base as-is.
- *
- * TODO: The base is a FlightRouterState only because that's the
- * representation the client router currently renders from (the router
- * reducer's `state.tree`, which the render tree and layout-router are
- * keyed against). Once the rendering path is updated to use RouteTree as its
- * source of truth, the base tree here can be a RouteTree, and the base-only
- * conversion path (convertFlightRouterStateToRouteTree) goes away with it.
+ *   any slot the response doesn't mention is copied from the base,
+ *   structure-only, under this response's rendered search.
  */
 export function decodeTransportTreeIntoRouteTree(
   transportNode: PartialTransportNode,
-  baseRouterState: FlightRouterState | null,
+  baseTree: RouteTree<unknown> | null,
   // The response's root vary params, unioned into every segment's drained
   // set. Pass null when vary params are unavailable or unwanted; see
   // createNavigationSeed.
@@ -371,8 +446,8 @@ export function decodeTransportTreeIntoRouteTree(
   return decodeTransportNode(
     transportNode,
     resolveTransportSegment(transportNode.s, pathnameParts, 0),
-    baseRouterState ?? undefined,
-    baseRouterState ?? undefined,
+    baseTree ?? undefined,
+    baseTree ?? undefined,
     rootVaryParams,
     isResponsePartial,
     ROOT_SEGMENT_REQUEST_KEY,
@@ -452,13 +527,13 @@ function decodeTransportNode(
   // The node's identity, already resolved by the caller (the parent's child
   // loop, which has the URL position needed to parse omitted param values).
   originalSegment: FlightRouterStateSegment,
-  base: FlightRouterState | undefined,
+  base: RouteTree<unknown> | undefined,
   // The base node to compare segment identities against (see
   // NavigationSeed.treeDivergedFromBase). Tracked separately from `base`:
   // inheritance drops the base inside authoritative subtrees, where the
   // comparison must continue, and keeps it through inactive parallel routes,
   // where the comparison must stop.
-  compareBase: FlightRouterState | undefined,
+  compareBase: RouteTree<unknown> | undefined,
   rootVaryParams: SetLedgerValue<VaryParamId> | null,
   isResponsePartial: boolean,
   requestKey: SegmentRequestKey,
@@ -483,7 +558,7 @@ function decodeTransportNode(
       // URL (see resolveTransportSegment). Nothing to compare; the children
       // are still checked.
     } else {
-      const baseSegment = compareBase[0]
+      const baseSegment = compareBase.segment
       if (originalSegment === DEFAULT_SEGMENT_KEY) {
         // A default filled in by the server is not a claim about the
         // position's identity.
@@ -493,7 +568,8 @@ function decodeTransportNode(
     }
   }
 
-  const baseHints = inheritedBase !== undefined ? (inheritedBase[4] ?? 0) : 0
+  const baseHints =
+    inheritedBase !== undefined ? inheritedBase.prefetchHints : 0
   let prefetchHints = node.h ?? baseHints
 
   // This segment's param (if any) is a root param iff the segment is at or
@@ -504,12 +580,12 @@ function decodeTransportNode(
   // search is updated to this response's, since all pages within the same
   // response share the same search value. (The refresh state acts like a
   // "context provider" for inactive parallel routes.)
-  const baseCompressedRefreshState =
-    inheritedBase !== undefined ? (inheritedBase[2] ?? null) : null
+  const baseRefreshState =
+    inheritedBase !== undefined ? inheritedBase.refreshState : null
   const refreshState: RefreshState | null =
-    baseCompressedRefreshState !== null
+    baseRefreshState !== null
       ? {
-          canonicalUrl: baseCompressedRefreshState[0] as string,
+          canonicalUrl: baseRefreshState.canonicalUrl,
           renderedSearch: parentRenderedSearch,
         }
       : null
@@ -529,28 +605,30 @@ function decodeTransportNode(
 
   let slots: Map<string, RouteTree<RSCSegmentData | null>> | null = null
   const transportChildren = node.c
-  const baseChildren =
-    inheritedBase !== undefined ? inheritedBase[1] : undefined
+  const baseChildren = inheritedBase !== undefined ? inheritedBase.slots : null
   if (transportChildren !== undefined) {
     for (const [parallelRouteKey, childNode] of transportChildren) {
       const childBase =
-        baseChildren !== undefined ? baseChildren[parallelRouteKey] : undefined
+        baseChildren !== null ? baseChildren.get(parallelRouteKey) : undefined
       const childSegment = resolveTransportSegment(
         childNode.s,
         pathnameParts,
         pathnamePartsIndex
       )
 
-      let childCompareBase: FlightRouterState | undefined
+      let childCompareBase: RouteTree<unknown> | undefined
       if (compareBase !== undefined && !acc.treeDivergedFromBase) {
-        const childCompareCandidate = compareBase[1][parallelRouteKey]
+        const childCompareCandidate =
+          compareBase.slots !== null
+            ? compareBase.slots.get(parallelRouteKey)
+            : undefined
         if (childCompareCandidate === undefined) {
           // A slot the base tree doesn't have. Unless the server merely
           // filled it with a default, the trees have different structures.
           if (childSegment !== DEFAULT_SEGMENT_KEY) {
             acc.treeDivergedFromBase = true
           }
-        } else if ((childCompareCandidate[2] ?? null) !== null) {
+        } else if (childCompareCandidate.refreshState !== null) {
           // The base branch carries a refresh state: an inactive parallel
           // route reused from a different route (e.g. a "default" slot). The
           // server's answer is expected to differ, so skip the branch.
@@ -593,23 +671,22 @@ function decodeTransportNode(
       slots.set(parallelRouteKey, childTree)
     }
   }
-  if (baseChildren !== undefined) {
+  if (baseChildren !== null) {
     // Slots the response carries no information about are reused from the
     // base tree, structure-only.
-    for (const parallelRouteKey in baseChildren) {
+    for (const [parallelRouteKey, childBase] of baseChildren) {
       if (
         transportChildren !== undefined &&
         transportChildren.has(parallelRouteKey)
       ) {
         continue
       }
-      const childBase = baseChildren[parallelRouteKey]
       const childRequestKey = appendSegmentRequestKeyPart(
         requestKey,
         parallelRouteKey,
-        createSegmentRequestKeyPart(childBase[0])
+        createSegmentRequestKeyPart(childBase.segment)
       )
-      const childTree = convertFlightRouterStateToRouteTree(
+      const childTree = copyRouteTreeStructure(
         childBase,
         childRequestKey,
         partialVaryPath,

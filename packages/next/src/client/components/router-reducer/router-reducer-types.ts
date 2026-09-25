@@ -122,7 +122,9 @@ export type AppHistoryState = {
  */
 export interface ServerPatchAction {
   type: typeof ACTION_SERVER_PATCH
-  previousTree: FlightRouterState
+  // The render tree of the navigation that mismatched; the retry is dropped
+  // if a newer navigation has replaced it.
+  previousRoot: RootRouteTree<CacheNode>
   url: URL
   nextUrl: string | null
   seed: NavigationSeed | null

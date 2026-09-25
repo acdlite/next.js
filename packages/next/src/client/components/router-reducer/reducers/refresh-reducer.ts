@@ -5,7 +5,7 @@ import type {
 } from '../router-reducer-types'
 import { ScrollBehavior } from '../router-reducer-types'
 import { navigateToKnownRoute } from '../../app-router-state'
-import { createNavigationSeed } from '../../segment-cache/decode-server-response'
+import { createNavigationSeedFromRouteTree } from '../../segment-cache/decode-server-response'
 import {
   invalidateSegmentCacheEntries,
   segmentCacheMap,
@@ -62,28 +62,16 @@ export function refreshDynamicData(
   const currentCanonicalUrl = state.canonicalUrl
   const currentUrl = new URL(currentCanonicalUrl, location.origin)
   const currentRenderedSearch = state.renderedSearch
-  const currentFlightRouterState = state.tree
   const scrollBehavior = ScrollBehavior.NoScroll
   const navigationLock = getCurrentNavigationLock()
 
-  // Create a NavigationSeed from the current FlightRouterState.
-  // TODO: Eventually we will store this type directly on the state object
-  // instead of reconstructing it on demand. Part of a larger series of
-  // refactors to unify the various tree types that the client deals with.
   const now = Date.now()
   // TODO: Store the dynamic stale time on the top-level state so it's known
   // during restores and refreshes.
-  const refreshSeed = createNavigationSeed(
+  const refreshSeed = createNavigationSeedFromRouteTree(
     now,
-    currentFlightRouterState,
-    // No transport data (and so no vary params, no partiality, and no
-    // pathname to parse params from) — this converts the base tree alone.
-    null,
-    null,
-    true,
-    null,
+    state.root.tree,
     currentRenderedSearch,
-    null,
     UnknownDynamicStaleTime
   )
 
