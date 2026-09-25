@@ -1,4 +1,9 @@
-import { getLedgerValue, emptySetLedger } from './ledgers'
+import {
+  addToLedger,
+  getLedgerValue,
+  emptySetLedger,
+  StaleTimeLedger,
+} from './ledgers'
 import type { SetLedger } from './ledgers'
 import type { VaryParamId } from '../../shared/lib/segment-cache/vary-params-decoding'
 import type { ComponentType } from 'react'
@@ -379,14 +384,12 @@ async function createComponentTreeInternal(
     }
   }
 
-  // Read unstable_dynamicStaleTime from page modules (not layouts) and track it on
-  // the store's stale field. This affects the segment cache stale time via
-  // the StaleTimeIterable.
-  if (
-    isPage &&
-    typeof layoutOrPageMod?.unstable_dynamicStaleTime === 'number'
-  ) {
-    const pageStaleTime = layoutOrPageMod.unstable_dynamicStaleTime
+  // Track the page export in the server-wide minimum. Built-in renders also
+  // carry it into the page's capture below, independently of other segments.
+  const pageStaleTime = isPage
+    ? layoutOrPageMod?.unstable_dynamicStaleTime
+    : undefined
+  if (typeof pageStaleTime === 'number') {
     switch (workUnitStore.type) {
       case 'prerender':
       case 'prerender-runtime':
@@ -800,7 +803,8 @@ async function createComponentTreeInternal(
       // No user-provided component, so no params will be accessed. Use the
       // pre-resolved empty tracker.
       emptySetLedger,
-      null
+      null,
+      undefined
     )
   }
 
@@ -936,7 +940,8 @@ async function createComponentTreeInternal(
       isPossiblyPartialResponse,
 
       varyParamsAccumulator,
-      MetadataOutlet ? createElement(MetadataOutlet, { tree }) : null
+      MetadataOutlet ? createElement(MetadataOutlet, { tree }) : null,
+      pageStaleTime
     )
   } else {
     const SegmentComponent = Component
@@ -1153,7 +1158,8 @@ async function createComponentTreeInternal(
       loadingData,
       isPossiblyPartialResponse,
       varyParamsAccumulator,
-      null
+      null,
+      undefined
     )
   }
 }
@@ -1307,7 +1313,8 @@ function createTransportNode(
   loading: LoadingModuleData | null,
   isPossiblyPartialResponse: boolean,
   varyParamsAccumulator: SetLedger<VaryParamId> | null,
-  metadataOutlet: React.ReactNode
+  metadataOutlet: React.ReactNode,
+  staleTime: number | undefined
 ): PartialTransportNode {
   const createElement = ctx.componentMod.createElement
   if (loading !== null) {
@@ -1330,12 +1337,27 @@ function createTransportNode(
   }
   let varyParams: TransportSegmentData['v'] =
     getLedgerValue(varyParamsAccumulator) ?? null
+  let staleTimeTotal: TransportSegmentData['s']
   if (process.env.__NEXT_LEDGERS) {
-    const captured = ctx.componentMod.captureLedgers(rsc, [
-      ctx.componentMod.VaryParamsLedger,
-    ])
+    const captured = ctx.componentMod.captureLedgers(
+      staleTime !== undefined
+        ? createElement(ctx.componentMod.SegmentWithStaleTime, {
+            rsc,
+            staleTime,
+          })
+        : rsc,
+      [ctx.componentMod.VaryParamsLedger, ctx.componentMod.StaleTimeLedger]
+    )
     rsc = captured.data
     varyParams = varyParamsAccumulator !== null ? captured.ledgers[0] : null
+    const store = workUnitAsyncStorage.getStore()
+    if (
+      store &&
+      'staleTimeAccumulator' in store &&
+      store.staleTimeAccumulator !== undefined
+    ) {
+      staleTimeTotal = captured.ledgers[1]
+    }
   }
   // Metadata validation must not contribute to the body's totals.
   if (metadataOutlet !== null) {
@@ -1345,9 +1367,23 @@ function createTransportNode(
     r: rsc,
     p: isPossiblyPartialResponse,
     v: varyParams,
+    s: staleTimeTotal,
   }
   if (children !== undefined) {
     node.c = children
   }
   return node
+}
+
+export function SegmentWithStaleTime({
+  rsc,
+  staleTime,
+}: {
+  rsc: React.ReactNode
+  staleTime: number
+}) {
+  // The page export is known before rendering. Write it inside the capture so
+  // it follows this page's data when the response is split into segments.
+  addToLedger(StaleTimeLedger, staleTime)
+  return rsc
 }

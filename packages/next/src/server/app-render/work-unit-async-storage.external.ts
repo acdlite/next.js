@@ -5,6 +5,7 @@ import type { ResponseCookies } from '../web/spec-extension/cookies'
 import type { ReadonlyHeaders } from '../web/spec-extension/adapters/headers'
 import type { ReadonlyRequestCookies } from '../web/spec-extension/adapters/request-cookies'
 import type { CacheSignal } from './cache-signal'
+import type { MinLedger } from './ledgers'
 import type { DynamicTrackingState } from './dynamic-rendering'
 import type { OpaqueFallbackRouteParams } from '../request/fallback-params'
 
@@ -75,6 +76,7 @@ export interface RequestStore extends CommonWorkUnitStore {
   resumeDataCache: ResumeDataCache | null
 
   stale?: number
+  staleTimeAccumulator?: MinLedger
 
   stagedRendering?: StagedRenderingController | null
   asyncApiPromises?: AsyncApiPromises
@@ -223,6 +225,7 @@ export interface RevalidateStore {
   revalidate: number // in seconds. 0 means dynamic. INFINITE_CACHE and higher means never revalidate.
   expire: number // server expiration time
   stale: number // client expiration time
+  staleTimeAccumulator?: MinLedger
   tags: null | string[]
 }
 
