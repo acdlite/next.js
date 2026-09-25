@@ -9,14 +9,8 @@
  */
 
 "use strict";
-var ReactDOM = require("react-dom");
-function createStringDecoder() {
-  return new TextDecoder("utf-8", {
-    ignoreBOM:
-      0 < arguments.length && void 0 !== arguments[0] ? arguments[0] : !1
-  });
-}
-var decoderOptions = { stream: !0 },
+var ReactDOM = require("react-dom"),
+  decoderOptions = { stream: !0 },
   hasOwnProperty = Object.prototype.hasOwnProperty;
 function resolveClientReference(bundlerConfig, metadata) {
   if (bundlerConfig) {
@@ -138,6 +132,7 @@ var ReactDOMSharedInternals =
     ReactDOM.__DOM_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE,
   REACT_ELEMENT_TYPE = Symbol.for("react.transitional.element"),
   REACT_LAZY_TYPE = Symbol.for("react.lazy"),
+  REACT_LEDGER_TOTAL_TYPE = Symbol.for("react.ledger_total"),
   MAYBE_ITERATOR_SYMBOL = Symbol.iterator;
 function getIteratorFn(maybeIterable) {
   if (null === maybeIterable || "object" !== typeof maybeIterable) return null;
@@ -150,8 +145,7 @@ var ASYNC_ITERATOR = Symbol.asyncIterator,
   isArrayImpl = Array.isArray,
   getPrototypeOf = Object.getPrototypeOf,
   ObjectPrototype$1 = Object.prototype,
-  knownServerReferences = new WeakMap(),
-  knownServerObjectReferences = new WeakMap();
+  knownServerReferences = new WeakMap();
 function serializeNumber(number) {
   return Number.isFinite(number)
     ? 0 === number && -Infinity === 1 / number
@@ -298,42 +292,30 @@ function processReply(
   function resolveToJSON(key, value) {
     if (null === value) return null;
     if ("object" === typeof value) {
-      var objectReferenceId = knownServerObjectReferences.get(value);
-      if (void 0 !== objectReferenceId) {
-        key = writtenObjects.get(value);
-        if (void 0 !== key)
-          if (modelRoot === value) modelRoot = null;
-          else return key;
-        key = JSON.stringify({ id: objectReferenceId }, resolveToJSON);
-        null === formData && (formData = new FormData());
-        var refId = nextPartId++;
-        formData.set(formFieldPrefix + refId, key);
-        key = "$H" + refId.toString(16);
-        writtenObjects.set(value, key);
-        return key;
-      }
       switch (value.$$typeof) {
         case REACT_ELEMENT_TYPE:
-          if (
-            void 0 !== temporaryReferences &&
-            -1 === key.indexOf(":") &&
-            ((refId = writtenObjects.get(this)), void 0 !== refId)
-          )
-            return temporaryReferences.set(refId + ":" + key, value), "$T";
+          if (void 0 !== temporaryReferences && -1 === key.indexOf(":")) {
+            var parentReference = writtenObjects.get(this);
+            if (void 0 !== parentReference)
+              return (
+                temporaryReferences.set(parentReference + ":" + key, value),
+                "$T"
+              );
+          }
           if (void 0 !== temporaryReferences && modelRoot === value)
             return (modelRoot = null), "$T";
           throw Error(
             "React Element cannot be passed to Server Functions from the Client without a temporary reference set. Pass a TemporaryReferenceSet to the options."
           );
         case REACT_LAZY_TYPE:
-          objectReferenceId = value._payload;
+          parentReference = value._payload;
           var init = value._init;
           null === formData && (formData = new FormData());
           pendingParts++;
           try {
-            refId = init(objectReferenceId);
-            var lazyId = nextPartId++,
-              partJSON = serializeModel(refId, lazyId);
+            var resolvedModel = init(parentReference),
+              lazyId = nextPartId++,
+              partJSON = serializeModel(resolvedModel, lazyId);
             formData.append(formFieldPrefix + lazyId, partJSON);
             return "$" + lazyId.toString(16);
           } catch (x) {
@@ -344,7 +326,7 @@ function processReply(
             ) {
               pendingParts++;
               var lazyId$23 = nextPartId++;
-              refId = function () {
+              parentReference = function () {
                 try {
                   var partJSON$24 = serializeModel(value, lazyId$23),
                     data$25 = formData;
@@ -355,7 +337,7 @@ function processReply(
                   reject(reason);
                 }
               };
-              x.then(refId, refId);
+              x.then(parentReference, parentReference);
               return "$" + lazyId$23.toString(16);
             }
             reject(x);
@@ -364,11 +346,11 @@ function processReply(
             pendingParts--;
           }
       }
-      refId = writtenObjects.get(value);
+      parentReference = writtenObjects.get(value);
       if ("function" === typeof value.then) {
-        if (void 0 !== refId)
+        if (void 0 !== parentReference)
           if (modelRoot === value) modelRoot = null;
-          else return refId;
+          else return parentReference;
         null === formData && (formData = new FormData());
         pendingParts++;
         var promiseId = nextPartId++;
@@ -377,12 +359,12 @@ function processReply(
         value.then(function (partValue) {
           try {
             var previousReference = writtenObjects.get(partValue);
-            var partJSON$28 =
+            var partJSON$27 =
               void 0 !== previousReference
                 ? JSON.stringify(previousReference)
                 : serializeModel(partValue, promiseId);
             partValue = formData;
-            partValue.append(formFieldPrefix + promiseId, partJSON$28);
+            partValue.append(formFieldPrefix + promiseId, partJSON$27);
             pendingParts--;
             0 === pendingParts && resolve(partValue);
           } catch (reason) {
@@ -391,51 +373,51 @@ function processReply(
         }, reject);
         return key;
       }
-      if (void 0 !== refId)
+      if (void 0 !== parentReference)
         if (modelRoot === value) modelRoot = null;
-        else return refId;
+        else return parentReference;
       else
         -1 === key.indexOf(":") &&
-          ((refId = writtenObjects.get(this)),
-          void 0 !== refId &&
-            ((key = refId + ":" + key),
+          ((parentReference = writtenObjects.get(this)),
+          void 0 !== parentReference &&
+            ((key = parentReference + ":" + key),
             writtenObjects.set(value, key),
             void 0 !== temporaryReferences &&
               temporaryReferences.set(key, value)));
       if (isArrayImpl(value)) return value;
       if (value instanceof FormData) {
         null === formData && (formData = new FormData());
-        var data$32 = formData;
+        var data$31 = formData;
         key = nextPartId++;
         var prefix = formFieldPrefix + "_" + key + "_";
         value.forEach(function (originalValue, originalKey) {
-          data$32.append(prefix + originalKey, originalValue);
+          data$31.append(prefix + originalKey, originalValue);
         });
         return "$K" + key.toString(16);
       }
       if (value instanceof Map)
         return (
           (key = nextPartId++),
-          (refId = serializeModel(Array.from(value), key)),
+          (parentReference = serializeModel(Array.from(value), key)),
           null === formData && (formData = new FormData()),
-          formData.append(formFieldPrefix + key, refId),
+          formData.append(formFieldPrefix + key, parentReference),
           "$Q" + key.toString(16)
         );
       if (value instanceof Set)
         return (
           (key = nextPartId++),
-          (refId = serializeModel(Array.from(value), key)),
+          (parentReference = serializeModel(Array.from(value), key)),
           null === formData && (formData = new FormData()),
-          formData.append(formFieldPrefix + key, refId),
+          formData.append(formFieldPrefix + key, parentReference),
           "$W" + key.toString(16)
         );
       if (value instanceof ArrayBuffer)
         return (
           (key = new Blob([value])),
-          (refId = nextPartId++),
+          (parentReference = nextPartId++),
           null === formData && (formData = new FormData()),
-          formData.append(formFieldPrefix + refId, key),
-          "$A" + refId.toString(16)
+          formData.append(formFieldPrefix + parentReference, key),
+          "$A" + parentReference.toString(16)
         );
       if (value instanceof Int8Array) return serializeTypedArray("O", value);
       if (value instanceof Uint8Array) return serializeTypedArray("o", value);
@@ -461,14 +443,17 @@ function processReply(
         );
       if ((key = getIteratorFn(value)))
         return (
-          (refId = key.call(value)),
-          refId === value
+          (parentReference = key.call(value)),
+          parentReference === value
             ? ((key = nextPartId++),
-              (refId = serializeModel(Array.from(refId), key)),
+              (parentReference = serializeModel(
+                Array.from(parentReference),
+                key
+              )),
               null === formData && (formData = new FormData()),
-              formData.append(formFieldPrefix + key, refId),
+              formData.append(formFieldPrefix + key, parentReference),
               "$i" + key.toString(16))
-            : Array.from(refId)
+            : Array.from(parentReference)
         );
       if (
         "function" === typeof ReadableStream &&
@@ -501,27 +486,30 @@ function processReply(
     if ("number" === typeof value) return serializeNumber(value);
     if ("undefined" === typeof value) return "$undefined";
     if ("function" === typeof value) {
-      refId = knownServerReferences.get(value);
-      if (void 0 !== refId) {
+      parentReference = knownServerReferences.get(value);
+      if (void 0 !== parentReference) {
         key = writtenObjects.get(value);
         if (void 0 !== key) return key;
         key = JSON.stringify(
-          { id: refId.id, bound: refId.bound },
+          { id: parentReference.id, bound: parentReference.bound },
           resolveToJSON
         );
         null === formData && (formData = new FormData());
-        refId = nextPartId++;
-        formData.set(formFieldPrefix + refId, key);
-        key = "$h" + refId.toString(16);
+        parentReference = nextPartId++;
+        formData.set(formFieldPrefix + parentReference, key);
+        key = "$h" + parentReference.toString(16);
         writtenObjects.set(value, key);
         return key;
       }
       if (
         void 0 !== temporaryReferences &&
         -1 === key.indexOf(":") &&
-        ((refId = writtenObjects.get(this)), void 0 !== refId)
+        ((parentReference = writtenObjects.get(this)),
+        void 0 !== parentReference)
       )
-        return temporaryReferences.set(refId + ":" + key, value), "$T";
+        return (
+          temporaryReferences.set(parentReference + ":" + key, value), "$T"
+        );
       throw Error(
         "Client Functions cannot be passed directly to Server Functions. Only Functions passed from the Server can be passed back again."
       );
@@ -530,9 +518,12 @@ function processReply(
       if (
         void 0 !== temporaryReferences &&
         -1 === key.indexOf(":") &&
-        ((refId = writtenObjects.get(this)), void 0 !== refId)
+        ((parentReference = writtenObjects.get(this)),
+        void 0 !== parentReference)
       )
-        return temporaryReferences.set(refId + ":" + key, value), "$T";
+        return (
+          temporaryReferences.set(parentReference + ":" + key, value), "$T"
+        );
       throw Error(
         "Symbols cannot be passed to a Server Function without a temporary reference set. Pass a TemporaryReferenceSet to the options."
       );
@@ -696,43 +687,7 @@ function registerBoundServerReference(reference, id, bound, encodeFormAction) {
       bind: { value: bind }
     }));
 }
-var serverObjectReferenceProxyHandlers = {
-    get: function (target, name) {
-      switch (name) {
-        case "$$typeof":
-          return target.$$typeof;
-        case "name":
-          return;
-        case "displayName":
-          return;
-        case "defaultProps":
-          return;
-        case "_debugInfo":
-          return;
-        case ASYNC_ITERATOR:
-          return;
-        case "toJSON":
-          return;
-        case Symbol.toPrimitive:
-          return Object.prototype[Symbol.toPrimitive];
-        case Symbol.toStringTag:
-          return Object.prototype[Symbol.toStringTag];
-        case "then":
-          return;
-      }
-      throw Error(
-        "Cannot access " +
-          String(name) +
-          " on the client. You cannot read a Server Reference to an object on the client. You can only pass it back to the server."
-      );
-    },
-    set: function () {
-      throw Error(
-        "Cannot assign to a Server Reference to an object on the client."
-      );
-    }
-  },
-  FunctionBind = Function.prototype.bind,
+var FunctionBind = Function.prototype.bind,
   ArraySlice = Array.prototype.slice;
 function bind() {
   var referenceClosure = knownServerReferences.get(this);
@@ -782,6 +737,109 @@ function createServerReference$1(id, callServer, encodeFormAction) {
   registerBoundServerReference(action, id, null, encodeFormAction);
   return action;
 }
+function createLedgerCell(type) {
+  switch (type.kind) {
+    case 0:
+      return { kind: 0, state: !1 };
+    case 1:
+      return { kind: 1, state: 0 };
+    case 2:
+      return { kind: 2, state: null };
+    case 3:
+      return { kind: 3, state: null };
+    default:
+      return { kind: 4, state: new Set() };
+  }
+}
+function readLedgerTotal(total) {
+  var graph = total.graph;
+  if (null !== graph) {
+    var dirty = graph.dirtyUnits;
+    if (null !== dirty) {
+      graph.totals.forEach(function (record) {
+        updateLedgerTotal(record, dirty);
+      });
+      for (var unit = dirty; null !== unit; ) {
+        var next = unit.nextDirty;
+        unit.isQueued = !1;
+        unit.nextDirty = null;
+        unit = next;
+      }
+      graph.dirtyUnits = null;
+    }
+  }
+  unit = total.cell;
+  null === unit &&
+    ((total.cell = unit = createLedgerCell(total.type)),
+    (total.visitedUnits = new WeakSet()),
+    updateLedgerTotal(total, null));
+  null !== graph &&
+    (graph.closed
+      ? ((total.graph = null), (total.visitedUnits = null))
+      : graph.isTracking || (graph.isTracking = !0));
+  return unit;
+}
+function updateLedgerTotal(total, dirty) {
+  var acc = total.cell,
+    visitedUnits = total.visitedUnits;
+  if (null !== acc && null !== visitedUnits) {
+    for (var type = total.type, queue = []; null !== dirty; )
+      visitedUnits.has(dirty) && queue.push(dirty), (dirty = dirty.nextDirty);
+    total = total.pendingCaptureUnits;
+    for (dirty = 0; dirty < total.length; dirty++) {
+      var unit = total[dirty];
+      visitedUnits.has(unit) || (visitedUnits.add(unit), queue.push(unit));
+    }
+    for (dirty = 0; dirty < queue.length; dirty++) {
+      unit = queue[dirty];
+      var cells = unit.cells;
+      cells = null === cells ? void 0 : cells.get(type);
+      if (void 0 !== cells)
+        switch (acc.kind) {
+          case 0:
+            acc.state = acc.state || cells.state;
+            break;
+          case 1:
+            acc.state = (acc.state | cells.state) >>> 0;
+            break;
+          case 2:
+            cells = cells.state;
+            var previous = acc.state;
+            null !== cells &&
+              (null === previous || cells < previous) &&
+              (acc.state = cells);
+            break;
+          case 3:
+            cells = cells.state;
+            previous = acc.state;
+            null !== cells &&
+              (null === previous || cells > previous) &&
+              (acc.state = cells);
+            break;
+          case 4:
+            cells.state.forEach(function (entry) {
+              acc.state.add(entry);
+            });
+        }
+      cells = unit.references;
+      if (null !== cells)
+        for (previous = 0; previous < cells.length; previous++) {
+          var target = cells[previous];
+          visitedUnits.has(target) ||
+            (visitedUnits.add(target), queue.push(target));
+        }
+      unit = unit.children;
+      if (null !== unit)
+        for (cells = 0; cells < unit.length; cells++)
+          (previous = unit[cells]),
+            (target = previous.capturedLedgers),
+            (null !== target && -1 !== target.indexOf(type)) ||
+              visitedUnits.has(previous) ||
+              (visitedUnits.add(previous), queue.push(previous));
+    }
+    total.length = 0;
+  }
+}
 var ObjectPrototype = Object.prototype,
   ArrayPrototype = Array.prototype;
 function ReactPromise(status, value, reason) {
@@ -801,6 +859,9 @@ Object.defineProperty(ReactPromise.prototype, "then", {
         break;
       case "resolved_module":
         initializeModuleChunk(this);
+        break;
+      case "resolved_ledger":
+        initializeLedgerChunk(this);
     }
     switch (this.status) {
       case "fulfilled":
@@ -829,6 +890,9 @@ function readChunk(chunk) {
       break;
     case "resolved_module":
       initializeModuleChunk(chunk);
+      break;
+    case "resolved_ledger":
+      initializeLedgerChunk(chunk);
   }
   switch (chunk.status) {
     case "fulfilled":
@@ -841,6 +905,9 @@ function readChunk(chunk) {
     default:
       throw chunk.reason;
   }
+}
+function createPendingChunk() {
+  return new ReactPromise("pending", null, null);
 }
 function wakeChunk(response, listeners, value, chunk) {
   for (var i = 0; i < listeners.length; i++) {
@@ -1075,6 +1142,7 @@ function initializeModuleChunk(chunk) {
 function reportGlobalError(weakResponse, error) {
   weakResponse._closed = !0;
   weakResponse._closedReason = error;
+  resolveLedgerTotalsAtClose(weakResponse);
   weakResponse._chunks.forEach(function (chunk) {
     "pending" === chunk.status
       ? triggerErrorOnChunk(weakResponse, chunk, error)
@@ -1098,7 +1166,7 @@ function getChunk(response, id) {
       ? response._allowPartialStream
         ? new ReactPromise("halted", null, null)
         : new ReactPromise("rejected", null, response._closedReason)
-      : new ReactPromise("pending", null, null)),
+      : createPendingChunk()),
     chunks.set(id, chunk));
   return chunk;
 }
@@ -1194,19 +1262,19 @@ function fulfillReference(response, reference, value) {
       value.$$typeof === REACT_LAZY_TYPE;
 
     ) {
-      var referencedChunk$47 = value._payload;
-      if (referencedChunk$47 === handler.chunk) value = handler.value;
+      var referencedChunk$51 = value._payload;
+      if (referencedChunk$51 === handler.chunk) value = handler.value;
       else {
-        switch (referencedChunk$47.status) {
+        switch (referencedChunk$51.status) {
           case "resolved_model":
-            initializeModelChunk(referencedChunk$47);
+            initializeModelChunk(referencedChunk$51);
             break;
           case "resolved_module":
-            initializeModuleChunk(referencedChunk$47);
+            initializeModuleChunk(referencedChunk$51);
         }
-        switch (referencedChunk$47.status) {
+        switch (referencedChunk$51.status) {
           case "fulfilled":
-            value = referencedChunk$47.value;
+            value = referencedChunk$51.value;
             continue;
         }
         break;
@@ -1359,14 +1427,6 @@ function loadServerReference(response, metaData, parentObject, key) {
     }
   );
   return null;
-}
-function loadServerObjectReference(response, metaData) {
-  response = metaData.$$reference;
-  if (void 0 !== response) return response;
-  response = metaData.id;
-  var reference = new Proxy({}, serverObjectReferenceProxyHandlers);
-  knownServerObjectReferences.set(reference, response);
-  return (metaData.$$reference = reference);
 }
 var EMPTY_REFERENCE_PATH = [];
 function getOutlinedModel(response, reference, parentObject, key, map) {
@@ -1584,6 +1644,12 @@ function parseModelString(response, parentObject, key, value) {
         );
       case "S":
         return Symbol.for(value.slice(2));
+      case "y":
+        response = getResponseLedgers(response).totals.get(
+          parseInt(value.slice(2), 16)
+        );
+        if (void 0 !== response) return response.chunk;
+        return;
       case "h":
         return (
           (value = value.slice(2)),
@@ -1593,17 +1659,6 @@ function parseModelString(response, parentObject, key, value) {
             parentObject,
             key,
             loadServerReference
-          )
-        );
-      case "H":
-        return (
-          (value = value.slice(2)),
-          getOutlinedModel(
-            response,
-            value,
-            parentObject,
-            key,
-            loadServerObjectReference
           )
         );
       case "T":
@@ -1685,11 +1740,12 @@ function ResponseInstance(
   this._encodeFormAction = encodeFormAction;
   this._nonce = nonce;
   this._chunks = chunks;
-  this._stringDecoder = createStringDecoder(!0);
+  this._stringDecoder = new TextDecoder();
   this._closed = !1;
   this._closedReason = null;
   this._allowPartialStream = allowPartialStream;
   this._tempRefs = temporaryReferences;
+  this._ledgers = null;
 }
 function resolveBuffer(response, id, buffer) {
   response = response._chunks;
@@ -1791,8 +1847,8 @@ function startReadableStream(response, id, type) {
             (previousBlockedChunk = chunk));
       } else {
         chunk = previousBlockedChunk;
-        var chunk$62 = new ReactPromise("pending", null, null);
-        chunk$62.then(
+        var chunk$66 = createPendingChunk();
+        chunk$66.then(
           function (v) {
             return controller.enqueue(v);
           },
@@ -1800,10 +1856,10 @@ function startReadableStream(response, id, type) {
             return controller.error(e);
           }
         );
-        previousBlockedChunk = chunk$62;
+        previousBlockedChunk = chunk$66;
         chunk.then(function () {
-          previousBlockedChunk === chunk$62 && (previousBlockedChunk = null);
-          resolveModelChunk(response, chunk$62, json);
+          previousBlockedChunk === chunk$66 && (previousBlockedChunk = null);
+          resolveModelChunk(response, chunk$66, json);
         });
       }
     },
@@ -1859,7 +1915,7 @@ function startAsyncIterable(response, id, iterator) {
             { done: !0, value: void 0 },
             null
           );
-        buffer[nextReadIndex] = new ReactPromise("pending", null, null);
+        buffer[nextReadIndex] = createPendingChunk();
       }
       return buffer[nextReadIndex++];
     });
@@ -1940,11 +1996,7 @@ function startAsyncIterable(response, id, iterator) {
           for (
             closed = !0,
               nextWriteIndex === buffer.length &&
-                (buffer[nextWriteIndex] = new ReactPromise(
-                  "pending",
-                  null,
-                  null
-                ));
+                (buffer[nextWriteIndex] = createPendingChunk());
             nextWriteIndex < buffer.length;
 
           )
@@ -1960,12 +2012,82 @@ function resolveErrorProd() {
   error.stack = "Error: " + error.message;
   return error;
 }
+function getResponseLedgers(response) {
+  var ledgers = response._ledgers;
+  null === ledgers &&
+    (response._ledgers = ledgers =
+      {
+        totals: new Map(),
+        types: new Map(),
+        units: new Map(),
+        isTracking: !1,
+        dirtyUnits: null,
+        closed: !1
+      });
+  return ledgers;
+}
+function resolveLedgerTotalsAtClose(response) {
+  var ledgers = response._ledgers;
+  null !== ledgers &&
+    ((ledgers.closed = !0),
+    ledgers.totals.forEach(function (record) {
+      var chunk = record.chunk;
+      if ("pending" === chunk.status) {
+        var resolveListeners = chunk.value,
+          rejectListeners = chunk.reason;
+        chunk.status = "resolved_ledger";
+        chunk.value = record;
+        chunk.reason = response;
+        null !== resolveListeners
+          ? (initializeLedgerChunk(chunk),
+            wakeChunkIfInitialized(
+              response,
+              chunk,
+              resolveListeners,
+              rejectListeners
+            ))
+          : null !== record.cell && initializeLedgerChunk(chunk);
+      }
+    }));
+}
+function initializeLedgerChunk(chunk) {
+  var JSCompiler_inline_result = readLedgerTotal(chunk.value);
+  JSCompiler_inline_result =
+    4 === JSCompiler_inline_result.kind
+      ? new Set(JSCompiler_inline_result.state)
+      : JSCompiler_inline_result.state;
+  chunk.status = "fulfilled";
+  chunk.value =
+    null === JSCompiler_inline_result ? void 0 : JSCompiler_inline_result;
+  chunk.reason = null;
+}
+function getOrCreateUnit(ledgers, id) {
+  var unit = ledgers.units.get(id);
+  void 0 === unit &&
+    ((unit = {
+      children: null,
+      capturedLedgers: null,
+      cells: null,
+      references: null,
+      isQueued: !1,
+      nextDirty: null
+    }),
+    ledgers.units.set(id, unit));
+  return unit;
+}
+function markUnitDirty(ledgers, unit) {
+  ledgers.isTracking &&
+    !unit.isQueued &&
+    ((unit.isQueued = !0),
+    (unit.nextDirty = ledgers.dirtyUnits),
+    (ledgers.dirtyUnits = unit));
+}
 function mergeBuffer(buffer, lastChunk) {
   for (var l = buffer.length, byteLength = lastChunk.length, i = 0; i < l; i++)
     byteLength += buffer[i].byteLength;
   byteLength = new Uint8Array(byteLength);
-  for (var i$63 = (i = 0); i$63 < l; i$63++) {
-    var chunk = buffer[i$63];
+  for (var i$70 = (i = 0); i$70 < l; i$70++) {
+    var chunk = buffer[i$70];
     byteLength.set(chunk, i);
     i += chunk.byteLength;
   }
@@ -2133,6 +2255,131 @@ function processFullBinaryRow(response, streamState, id, tag, buffer, chunk) {
         "fulfilled" === id.status &&
         id.reason.close("" === buffer ? '"$undefined"' : buffer);
       break;
+    case 75:
+      a: {
+        switch (buffer.charCodeAt(0)) {
+          case 48:
+            buffer = 0;
+            break;
+          case 49:
+            buffer = 1;
+            break;
+          case 50:
+            buffer = 2;
+            break;
+          case 51:
+            buffer = 3;
+            break;
+          case 52:
+            buffer = 4;
+            break;
+          default:
+            break a;
+        }
+        getResponseLedgers(response).types.set(id, { kind: buffer });
+      }
+      break;
+    case 89:
+      buffer = parseInt(buffer, 16);
+      response = getResponseLedgers(response);
+      tag = response.types.get(buffer);
+      void 0 !== tag &&
+        ((buffer = createPendingChunk()),
+        (tag = {
+          chunk: buffer,
+          type: tag,
+          pendingCaptureUnits: [],
+          graph: response,
+          cell: null,
+          visitedUnits: null
+        }),
+        response.totals.set(id, tag),
+        (buffer.$$typeof = REACT_LEDGER_TOTAL_TYPE),
+        (buffer.total = tag));
+      break;
+    case 81:
+      buffer = parseModel(response, buffer);
+      response = getResponseLedgers(response);
+      tag = response.units;
+      id = getOrCreateUnit(response, id);
+      chunk = buffer[0];
+      null !== chunk &&
+        ((tag = tag.get(parseInt(chunk, 16))),
+        void 0 !== tag &&
+          ((chunk = tag.children),
+          null === chunk && (tag.children = chunk = []),
+          chunk.push(id),
+          markUnitDirty(response, tag)));
+      buffer = buffer[1];
+      if (0 !== buffer.length) {
+        tag = response.totals;
+        chunk = [];
+        for (streamState = 0; streamState < buffer.length; streamState++)
+          (row = tag.get(parseInt(buffer[streamState], 16))),
+            void 0 !== row &&
+              (chunk.push(row.type), row.pendingCaptureUnits.push(id));
+        id.capturedLedgers = chunk;
+      }
+      markUnitDirty(response, id);
+      break;
+    case 90:
+      buffer = parseModel(response, buffer);
+      tag = getResponseLedgers(response);
+      id = tag.units.get(id);
+      if (
+        void 0 !== id &&
+        ((response = tag.types.get(parseInt(buffer[0], 16))),
+        void 0 !== response)
+      )
+        switch (
+          (markUnitDirty(tag, id),
+          (tag = id.cells),
+          null === tag && (id.cells = tag = new Map()),
+          (id = tag.get(response)),
+          void 0 === id && tag.set(response, (id = createLedgerCell(response))),
+          id.kind)
+        ) {
+          case 0:
+            id.state = !0;
+            break;
+          case 1:
+            id.state = (id.state | buffer[1]) >>> 0;
+            break;
+          case 2:
+            response = buffer[1];
+            buffer = id.state;
+            if (null === buffer || response < buffer) id.state = response;
+            break;
+          case 3:
+            response = buffer[1];
+            buffer = id.state;
+            if (null === buffer || response > buffer) id.state = response;
+            break;
+          default:
+            for (
+              response = buffer[1], buffer = 0;
+              buffer < response.length;
+              buffer++
+            )
+              id.state.add(response[buffer]);
+        }
+      break;
+    case 70:
+      buffer = parseModel(response, buffer);
+      response = getResponseLedgers(response);
+      tag = response.units.get(id);
+      if (void 0 !== tag)
+        for (
+          markUnitDirty(response, tag),
+            id = tag.references,
+            null === id && (tag.references = id = []),
+            tag = 0;
+          tag < buffer.length;
+          tag++
+        )
+          (chunk = getOrCreateUnit(response, parseInt(buffer[tag], 16))),
+            id.push(chunk);
+      break;
     default:
       (tag = response._chunks),
         (chunk = tag.get(id))
@@ -2195,6 +2442,7 @@ function reviveModel(response, value, parentObject, key) {
 function close(weakResponse) {
   weakResponse._allowPartialStream
     ? ((weakResponse._closed = !0),
+      resolveLedgerTotalsAtClose(weakResponse),
       weakResponse._chunks.forEach(function (chunk) {
         "pending" === chunk.status || "pending_weak" === chunk.status
           ? ((chunk.status = "halted"),
