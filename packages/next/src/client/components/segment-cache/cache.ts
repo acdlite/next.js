@@ -3246,7 +3246,7 @@ function writeServerResponseIntoCache(
 
     // A head has no loading boundary. Match the scheduler, which spawns
     // LoadingBoundary head entries using the concrete Full strategy (see the
-    // head's runtime fetch in pingRootRouteTree).
+    // head's call to diffSegmentAgainstCurrent in pingRootRouteTree).
     const headFetchStrategy =
       fetchStrategy === FetchStrategy.LoadingBoundary
         ? FetchStrategy.Full

@@ -1,4 +1,4 @@
-import { compareParams, ParamsChange } from './vary-path'
+import { didReadChangedParam } from './vary-path'
 import type {
   FlightRouterState,
   CacheNode,
@@ -45,6 +45,7 @@ import {
 import type { CacheMap } from './cache-map'
 import type { NavigationLockPrefetch } from './navigation-testing-lock'
 import type { SegmentRequestKey } from '../../../shared/lib/segment-cache/segment-value-encoding'
+import { ROOT_SEGMENT_REQUEST_KEY } from '../../../shared/lib/segment-cache/segment-value-encoding'
 import { cleanup } from './lru'
 
 const scheduleMicrotask =
@@ -916,27 +917,21 @@ function pingRootRouteTree(
 
           // The head is a one-node tree beside the route tree (see
           // createMetadataRouteTree in cache.ts); it takes the same walk as
-          // a segment the current page doesn't have. If the head was inlined
-          // into a page's bundle (HeadOutlined is NOT set on the root), skip
-          // the standalone walk — the head data will arrive as part of that
-          // page's response, and its runtime-completeness signal is carried
-          // by that page's own entries.
-          const head = route.root.head
+          // the segments. If the head was inlined into a page's bundle
+          // (HeadOutlined is NOT set on the root), skip the standalone walk
+          // — the head data will arrive as part of that page's response, and
+          // its runtime-completeness signal is carried by that page's own
+          // entries.
           if (
             !process.env.__NEXT_PREFETCH_INLINING ||
-            (route.root.tree.prefetchHints & PrefetchHint.HeadOutlined) !== 0 ||
-            // An inlined head that can't attempt a static fetch still deopts
-            // to the runtime request (the first check of the decision point
-            // in pingSegmentInCacheComponentsTree); only the static fetch
-            // itself is skipped for an inlined head.
-            (walkCanUseRuntimeRequests(staticWalkStrategy, route) &&
-              !shouldSegmentAttemptStaticRequest(staticWalkStrategy, head))
+            (route.root.tree.prefetchHints & PrefetchHint.HeadOutlined) !== 0
           ) {
-            const headExitStatus = pingNewPartOfCacheComponentsTree(
+            const headExitStatus = pingSharedPartOfCacheComponentsTree(
               now,
               task,
               route,
-              head,
+              task.renderTreeAtTimeOfPrefetch.head,
+              route.root.head,
               null,
               staticWalkStrategy
             )
@@ -969,33 +964,35 @@ function pingRootRouteTree(
                 : FetchStrategy.PPRRuntime
 
             // spawnedRuntimePrefetches was populated during the traversal
-            // above: every subtree in the new part of the tree that needs a
-            // runtime prefetch, the head included — it registers under its
-            // own request key, like any segment, when its own static attempt
-            // was insufficient or never happened.
+            // above: every fetched subtree that needs a runtime prefetch,
+            // the head included — it registers under its own request key,
+            // like any segment, when its own static attempt was insufficient
+            // or never happened.
             //
-            // If it's null, nothing in the new part of the tree is a candidate
-            // for runtime prefetching, and we don't fetch the head, either —
-            // the head is runtime prefetched only if something is.
+            // If it's null, nothing in the tree is a candidate for runtime
+            // prefetching.
             const spawnedRuntimePrefetches = task.spawnedRuntimePrefetches
             if (spawnedRuntimePrefetches !== null) {
               const spawnedEntries = new Map<
                 SegmentRequestKey,
                 PendingSegmentCacheEntry
               >()
-              // The head has no position in the request tree — a runtime
-              // response carries it beside the segments (see
-              // writeServerResponseIntoCache in cache.ts) — so the head's
-              // own request tree is discarded.
-              pingRouteTreeAndIncludeDynamicData(
-                now,
-                task,
-                route,
-                head,
-                false,
-                spawnedEntries,
-                runtimeStrategy
-              )
+              const head = route.root.head
+              if (spawnedRuntimePrefetches.has(head.requestKey)) {
+                // The head has no position in the request tree — a runtime
+                // response carries it beside the segments (see
+                // writeServerResponseIntoCache in cache.ts) — so the head's
+                // own request tree is discarded.
+                pingRouteTreeAndIncludeDynamicData(
+                  now,
+                  task,
+                  route,
+                  head,
+                  false,
+                  spawnedEntries,
+                  runtimeStrategy
+                )
+              }
               const requestTree = pingRuntimePrefetches(
                 now,
                 task,
@@ -1033,24 +1030,26 @@ function pingRootRouteTree(
           // Prefetch multiple segments using a single runtime request.
           // TODO: We can consolidate this branch with previous one by modeling
           // it as if the first segment in the new tree has runtime prefetching
-          // enabled. Will do this as a follow-up refactor. Might want to remove
-          // the special metatdata case below first. In the meantime, it's not
-          // really that much duplication, just would be nice to remove one of
-          // these codepaths.
+          // enabled. Will do this as a follow-up refactor. The head no longer
+          // needs a special case here: it takes the same per-segment decision
+          // as the segments (diffSegmentAgainstCurrent below). In the
+          // meantime, it's not really that much duplication, just would be
+          // nice to remove one of these codepaths.
           const spawnedEntries = new Map<
             SegmentRequestKey,
             PendingSegmentCacheEntry
           >()
-          // The head has no position in the request tree — a runtime response
+          // The head takes the same per-segment decision as a child of the
+          // tree. It has no position in the request tree — a runtime response
           // carries it beside the segments (see writeServerResponseIntoCache
           // in cache.ts) — so the head's own request tree is discarded.
           const head = route.root.head
-          pingRouteTreeAndIncludeDynamicData(
+          diffSegmentAgainstCurrent(
             now,
             task,
             route,
+            task.renderTreeAtTimeOfPrefetch.head,
             head,
-            false,
             spawnedEntries,
             // When prefetching the head, there's no difference between Full
             // and LoadingBoundary: the head has no loading boundary, so a
@@ -1278,32 +1277,20 @@ function addSpawnedRuntimePrefetch(
 /**
  * The static walk over the part of the target route that also exists on the
  * current page: the current page's node and the target route's node at the
- * same position in the tree. It mirrors the navigation's traversal order (see
- * updateRenderTreeOnNavigation in render-tree.ts): first whether the route
- * position still matches — if not, this node begins the new part of the route
- * (pingNewPartOfCacheComponentsTree) — and then whether any of the node's
- * param values changed — if so, the node and everything below it begin the
- * new part of the route too. The walk does not consult which params a
- * segment read, so it prefetches more than the navigation replaces: the
- * navigation keeps data whose read params did not change and decides each
- * descendant on its own. A node the walk keeps is prefetched at the ordinary
- * static tier.
- * Its children continue here wherever the current page has a child in the
- * same slot; a child in a slot the current page doesn't have enters the new
- * part of the route directly.
+ * same position in the tree. It makes the same comparisons as the navigation,
+ * in the same order (see updateRenderTreeOnNavigation in render-tree.ts):
+ * first whether the route position still matches — if not, this node begins
+ * the new part of the route (pingNewPartOfCacheComponentsTree) — and then
+ * whether the node's current data read a param whose value changed. A node
+ * the navigation keeps is skipped — nothing is fetched for it, statically or
+ * via a runtime deopt. Its children continue here wherever the current page
+ * has a child in the same slot; a child in a slot the current page doesn't
+ * have enters the new part of the route directly.
  *
- * Bundle chains must not cross the strategy boundary: a kept node walks at
- * PPR while a Shell-phase new part walks at StaticShell, and a chain spanning
- * both would fulfill the kept node's concrete-path entry with shell-variant
- * data. Nor may the chain be finished by fetching the new-part node at PPR
- * — that would prefetch new-part segments at the concrete tier during the
- * Shell phase, which only the Speculative phase is allowed to do. So the
- * chain is dropped wherever the walk hands off to the new part during a
- * StaticShell walk, exactly like the drop sites in
- * pingSegmentInCacheComponentsTree: nothing in a dropped chain was upgraded
- * to Pending, so no entry is stranded, and the inlined kept data is fetched
- * by the Speculative pass whenever its walk of the new part permits the
- * child fetch.
+ * A bundle chain can only start at a fetched segment. A kept segment
+ * contributes nothing to a chain, and a chain that reaches it is dropped,
+ * like the drop sites in pingSegmentInCacheComponentsTree: nothing in an
+ * un-pinged chain was upgraded to Pending, so no entry is stranded.
  */
 function pingSharedPartOfCacheComponentsTree(
   now: number,
@@ -1317,6 +1304,13 @@ function pingSharedPartOfCacheComponentsTree(
   fetchStrategy: FetchStrategy.PPR | FetchStrategy.StaticShell
 ): PrefetchTaskExitStatus.InProgress | PrefetchTaskExitStatus.Done {
   if (!doesRouteStructureMatch(currentTree, newTree)) {
+    if (newTree.requestKey === ROOT_SEGMENT_REQUEST_KEY) {
+      // A different root segment (the global Not Found route renders in the
+      // root layout's position) means the navigation will be a full-page
+      // navigation (see updateRenderTreeOnNavigation in render-tree.ts), so
+      // there is nothing to prefetch.
+      return PrefetchTaskExitStatus.Done
+    }
     // We're entering the part of the target route that doesn't exist on the
     // current page.
     return pingNewPartOfCacheComponentsTree(
@@ -1324,43 +1318,36 @@ function pingSharedPartOfCacheComponentsTree(
       task,
       route,
       newTree,
-      fetchStrategy === FetchStrategy.StaticShell ? null : parentBundle,
-      fetchStrategy
-    )
-  }
-  if (
-    compareParams(currentTree.varyPath, newTree.varyPath) !== ParamsChange.None
-  ) {
-    // A param changed. The navigation replaces only the data that read it and
-    // decides each descendant on its own (see updateRenderTreeOnNavigation in
-    // render-tree.ts); this walk doesn't know what each segment read, so it
-    // prefetches the whole subtree.
-    return pingNewPartOfCacheComponentsTree(
-      now,
-      task,
-      route,
-      newTree,
-      fetchStrategy === FetchStrategy.StaticShell ? null : parentBundle,
+      parentBundle,
       fetchStrategy
     )
   }
 
-  // The navigation keeps this segment's current data. A kept segment always
-  // performs the ordinary static (PPR) prefetch, regardless of phase.
-  // Phase-specific strategies — the runtime shell request and the Shell
-  // phase's StaticShell walk — apply only to the new part of the tree, so the
-  // per-pass walk strategy is irrelevant here. (The needs-runtime signal is
-  // ignored: kept segments are already rendered on the current page, so a
-  // runtime prefetch has nothing to add.)
-  const bundleInProgress = accumulateSegmentBundle(
-    now,
-    task,
-    route,
-    newTree,
-    parentBundle,
-    FetchStrategy.PPR,
-    true
-  ).bundle
+  let bundleInProgress: SegmentBundle | null
+  if (
+    !didReadChangedParam(
+      currentTree.varyPath,
+      newTree.varyPath,
+      currentTree.data.varyParams
+    )
+  ) {
+    // The navigation keeps this segment's current data; nothing is fetched
+    // for it.
+    bundleInProgress = null
+  } else {
+    const accumulation = pingSegmentInCacheComponentsTree(
+      now,
+      task,
+      route,
+      newTree,
+      parentBundle,
+      fetchStrategy
+    )
+    if (accumulation === null) {
+      return PrefetchTaskExitStatus.Done
+    }
+    bundleInProgress = accumulation.bundle
+  }
 
   // Recursively ping the children, continuing in lockstep with the current
   // page wherever it has a child in the same slot.
@@ -1403,7 +1390,7 @@ function pingSharedPartOfCacheComponentsTree(
           task,
           route,
           newTreeChild,
-          fetchStrategy === FetchStrategy.StaticShell ? null : bundleForChild,
+          bundleForChild,
           fetchStrategy
         )
       }
@@ -1489,8 +1476,10 @@ function pingNewPartOfCacheComponentsTree(
 
 /**
  * The per-segment decision point of the static walk: the one place that
- * decides how a segment in the new part of the route — one the navigation
- * won't keep — is prefetched (pingNewPartOfCacheComponentsTree).
+ * decides how a segment the navigation won't keep is prefetched. Shared by
+ * the walk over the part of the route that also exists on the current page
+ * (pingSharedPartOfCacheComponentsTree) and the walk over the part that
+ * doesn't (pingNewPartOfCacheComponentsTree).
  *
  * When Cache Components is enabled (or PPR, or a fully static route when PPR
  * is disabled; those cases are treated equivalently to Cache Components), we
@@ -1610,7 +1599,7 @@ function diffRouteTreeAgainstCurrent(
   // - Finds the segments that differ from the current route, comparing each
   //   segment the same way the navigation will (see
   //   updateRenderTreeOnNavigation in render-tree.ts): its route position,
-  //   then whether any of its param values changed.
+  //   then whether its current data read a param that changed.
   // - Constructs a request tree (FlightRouterState) that describes which
   //   segments need to be prefetched and which ones are already cached.
   // - Creates a set of pending cache entries for the segments that need to
@@ -1649,11 +1638,11 @@ function diffRouteTreeAgainstCurrent(
  * The per-segment decision of a runtime request's tree walk
  * (diffRouteTreeAgainstCurrent): the segment at this position of the target
  * route, and the current page's segment at the same position, if it has one.
- * A segment the navigation keeps — same route position, and none of its param
- * values changed — is omitted from the request and the walk continues into
- * its children. Otherwise this segment begins a part of the tree that needs
- * to be prefetched (unless everything is already cached), requested according
- * to the strategy.
+ * A segment the navigation keeps — same route position, and its current data
+ * read none of the params that changed — is omitted from the request and the
+ * walk continues into its children. Otherwise this segment begins a part of
+ * the tree that needs to be prefetched (unless everything is already cached),
+ * requested according to the strategy.
  */
 function diffSegmentAgainstCurrent(
   now: number,
@@ -1670,7 +1659,11 @@ function diffSegmentAgainstCurrent(
   if (oldTree !== undefined && doesRouteStructureMatch(oldTree, newTree)) {
     // This segment is already part of the current route.
     if (
-      compareParams(oldTree.varyPath, newTree.varyPath) === ParamsChange.None
+      !didReadChangedParam(
+        oldTree.varyPath,
+        newTree.varyPath,
+        oldTree.data.varyParams
+      )
     ) {
       // The navigation keeps its data. Keep traversing.
       return diffRouteTreeAgainstCurrent(
